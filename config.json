@@ -1,0 +1,10 @@
+{
+  "oab_numero": "130678",
+  "oab_uf": "PR",
+  "nome_advogado": "Beatriz Daffara",
+  "datajud_api_key": "cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw==",
+  "backfill_dias": 180,
+  "janela_dias": 30,
+  "buscar_tambem_por_nome": false,
+  "porta": 8000
+}

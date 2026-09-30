@@ -1,0 +1,440 @@
+"""Banco SQLite local: processos, publicações (DJEN), movimentos (DataJud) e metadados."""
+import hashlib
+import json
+import sqlite3
+import unicodedata
+from contextlib import contextmanager
+from datetime import datetime
+
+from . import cnj, texto as txt
+from .config import DB_DIR, DB_PATH
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS processos (
+    numero            TEXT PRIMARY KEY,      -- 20 dígitos
+    tribunal          TEXT,
+    alias             TEXT,                  -- índice do DataJud (ex.: tjpr)
+    origem            TEXT,                  -- 'djen' ou 'manual'
+    orgao             TEXT,
+    classe            TEXT,
+    assuntos          TEXT,                  -- JSON (lista de nomes)
+    grau              TEXT,
+    data_ajuizamento  TEXT,
+    sistema           TEXT,
+    instancias        TEXT,                  -- JSON com um resumo por grau retornado pelo DataJud
+    partes            TEXT,                  -- JSON {"ativo": [...], "passivo": [...], "outros": [...]}
+    datajud_status    TEXT,                  -- NULL, ok, sem_dados, erro, sem_alias
+    datajud_msg       TEXT,
+    datajud_em        TEXT,
+    ult_mov_data      TEXT,
+    ult_mov_texto     TEXT,
+    ult_pub_data      TEXT,
+    ult_pub_texto     TEXT,
+    ult_atividade     TEXT,
+    novidade_em       TEXT,                  -- quando algo novo foi capturado
+    visto_em          TEXT,                  -- quando a advogada marcou como visto
+    busca             TEXT,                  -- texto normalizado para busca
+    criado_em         TEXT
+);
+CREATE TABLE IF NOT EXISTS comunicacoes (
+    hash              TEXT PRIMARY KEY,
+    djen_id           INTEGER,
+    numero            TEXT NOT NULL,
+    tribunal          TEXT,
+    orgao             TEXT,
+    tipo              TEXT,
+    tipo_documento    TEXT,
+    classe            TEXT,
+    data_disp         TEXT,                  -- YYYY-MM-DD
+    texto             TEXT,                  -- texto limpo (sem HTML)
+    texto_original    TEXT,                  -- original do DJEN, só quando era diferente
+    link              TEXT,
+    destinatarios     TEXT,                  -- JSON
+    advogados         TEXT,                  -- JSON
+    busca             TEXT,
+    capturado_em      TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_com_numero ON comunicacoes(numero, data_disp);
+CREATE TABLE IF NOT EXISTS movimentos (
+    chave             TEXT PRIMARY KEY,
+    numero            TEXT NOT NULL,
+    grau              TEXT,
+    codigo            INTEGER,
+    data_hora         TEXT,
+    nome              TEXT,
+    complementos      TEXT,
+    orgao             TEXT,
+    capturado_em      TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_mov_numero ON movimentos(numero, data_hora);
+CREATE TABLE IF NOT EXISTS meta (
+    chave             TEXT PRIMARY KEY,
+    valor             TEXT
+);
+CREATE TABLE IF NOT EXISTS sync_erros (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    sync_id           TEXT,
+    quando            TEXT,
+    fonte             TEXT,
+    tribunal          TEXT,
+    mensagem          TEXT
+);
+"""
+
+
+def agora() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def normalizar(texto: str) -> str:
+    """Minúsculas e sem acento, para busca tolerante ('citacao' acha 'Citação')."""
+    t = unicodedata.normalize("NFKD", texto or "")
+    return "".join(c for c in t if not unicodedata.combining(c)).lower()
+
+
+def iniciar():
+    DB_DIR.mkdir(exist_ok=True)
+    with conexao() as con:
+        con.executescript(SCHEMA)
+
+
+@contextmanager
+def savepoint(con):
+    """Isola a gravação de um item: se der erro, desfaz só ele e o resto da transação segue."""
+    con.execute("SAVEPOINT item")
+    try:
+        yield
+    except Exception:
+        con.execute("ROLLBACK TO item")
+        con.execute("RELEASE item")
+        raise
+    con.execute("RELEASE item")
+
+
+@contextmanager
+def conexao():
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield con
+        con.commit()
+    finally:
+        con.close()
+
+
+# --- meta ------------------------------------------------------------------
+
+def meta_get(con, chave, padrao=None):
+    row = con.execute("SELECT valor FROM meta WHERE chave=?", (chave,)).fetchone()
+    return row["valor"] if row else padrao
+
+
+def meta_set(con, chave, valor):
+    con.execute("INSERT INTO meta(chave, valor) VALUES(?, ?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
+                (chave, valor))
+
+
+# --- processos -------------------------------------------------------------
+
+def garantir_processo(con, numero: str, origem: str) -> bool:
+    """Cria o processo se não existir. Retorna True se foi criado agora."""
+    sigla, alias = cnj.tribunal(numero)
+    cur = con.execute(
+        "INSERT OR IGNORE INTO processos(numero, tribunal, alias, origem, criado_em, novidade_em) VALUES(?,?,?,?,?,?)",
+        (numero, sigla, alias, origem, agora(), agora()),
+    )
+    return cur.rowcount > 0
+
+
+def remover_processo(con, numero: str):
+    for tabela in ("comunicacoes", "movimentos", "processos"):
+        con.execute(f"DELETE FROM {tabela} WHERE numero=?", (numero,))
+
+
+# --- DJEN ------------------------------------------------------------------
+
+def _hash_comunicacao(item: dict) -> str:
+    if item.get("hash"):
+        return str(item["hash"])
+    base = f'{item.get("id")}|{item.get("numero_processo")}|{item.get("data_disponibilizacao")}|{item.get("texto", "")[:500]}'
+    return "sha1:" + hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+
+def _partes_de(destinatarios: list) -> dict:
+    partes = {"ativo": [], "passivo": [], "outros": []}
+    for d in destinatarios or []:
+        nome = (d.get("nome") or "").strip()
+        polo = {"A": "ativo", "P": "passivo"}.get(d.get("polo"), "outros")
+        if nome and nome not in partes[polo]:
+            partes[polo].append(nome)
+    return partes
+
+
+def salvar_comunicacao(con, item: dict) -> bool:
+    """Grava uma comunicação do DJEN (sem duplicar). Retorna True se for nova."""
+    numero = cnj.so_digitos(item.get("numero_processo") or item.get("numeroprocessocommascara") or "")
+    if not numero:
+        return False
+    destinatarios = item.get("destinatarios") or []
+    advogados = [a.get("advogado", {}) for a in item.get("destinatarioadvogados") or []]
+    bruto = item.get("texto") or ""
+    texto = txt.limpar(bruto)
+    busca = normalizar(" ".join([texto, " ".join(d.get("nome", "") for d in destinatarios)]))
+    cur = con.execute(
+        """INSERT OR IGNORE INTO comunicacoes
+           (hash, djen_id, numero, tribunal, orgao, tipo, tipo_documento, classe, data_disp, texto, texto_original,
+            link, destinatarios, advogados, busca, capturado_em)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            _hash_comunicacao(item), item.get("id"), numero, item.get("siglaTribunal"), item.get("nomeOrgao"),
+            item.get("tipoComunicacao"), item.get("tipoDocumento"), item.get("nomeClasse"),
+            item.get("data_disponibilizacao"), texto, bruto if bruto != texto else None, item.get("link"),
+            json.dumps(destinatarios, ensure_ascii=False), json.dumps(advogados, ensure_ascii=False),
+            busca, agora(),
+        ),
+    )
+    nova = cur.rowcount > 0
+    garantir_processo(con, numero, "djen")
+    if nova:
+        _mesclar_partes(con, numero, _partes_de(destinatarios))
+        con.execute("UPDATE processos SET novidade_em=? WHERE numero=?", (agora(), numero))
+    return nova
+
+
+def _mesclar_partes(con, numero, novas: dict):
+    row = con.execute("SELECT partes FROM processos WHERE numero=?", (numero,)).fetchone()
+    atuais = json.loads(row["partes"]) if row and row["partes"] else {"ativo": [], "passivo": [], "outros": []}
+    for polo, nomes in novas.items():
+        for n in nomes:
+            if n not in atuais.setdefault(polo, []):
+                atuais[polo].append(n)
+    con.execute("UPDATE processos SET partes=? WHERE numero=?", (json.dumps(atuais, ensure_ascii=False), numero))
+
+
+# --- DataJud ---------------------------------------------------------------
+
+def _data_ajuizamento(valor: str | None) -> str | None:
+    """DataJud mistura '20260513163404' e ISO; devolve 'YYYY-MM-DD'."""
+    if not valor:
+        return None
+    v = str(valor)
+    if v[:8].isdigit() and (len(v) == 8 or v[8:9].isdigit()):
+        return f"{v[0:4]}-{v[4:6]}-{v[6:8]}"
+    return v[:10]
+
+
+def _data_hora_mov(valor: str | None) -> str:
+    """Datas dos movimentos vêm como ISO com 'Z', mas na prática estão no horário local do tribunal."""
+    v = str(valor or "")
+    if v[:14].isdigit():
+        return f"{v[0:4]}-{v[4:6]}-{v[6:8]}T{v[8:10]}:{v[10:12]}:{v[12:14]}"
+    return v.replace("Z", "")[:19]
+
+
+def _complementos_texto(mov: dict) -> str:
+    partes = []
+    for c in mov.get("complementosTabelados") or []:
+        nome = c.get("nome") or c.get("valor")
+        if nome:
+            partes.append(str(nome))
+    return "; ".join(partes)
+
+
+def salvar_datajud(con, numero: str, hits: list[dict], completo: bool = True) -> int:
+    """Grava metadados e movimentos de todos os graus. Retorna quantos movimentos são novos.
+
+    completo=False (resposta parcial do DataJud): preserva o que já existe dos graus que não vieram.
+    """
+    fontes = [h.get("_source", h) for h in hits]
+    fontes.sort(key=lambda s: s.get("dataHoraUltimaAtualizacao") or "", reverse=True)
+    principal = fontes[0]
+
+    assuntos = []
+    for s in fontes:
+        for a in s.get("assuntos") or []:
+            # assuntos às vezes vêm aninhados em listas
+            for item in (a if isinstance(a, list) else [a]):
+                nome = (item or {}).get("nome")
+                if nome and nome not in assuntos:
+                    assuntos.append(nome)
+    instancias = [
+        {
+            "grau": s.get("grau"),
+            "orgao": (s.get("orgaoJulgador") or {}).get("nome"),
+            "classe": (s.get("classe") or {}).get("nome"),
+            "sistema": (s.get("sistema") or {}).get("nome"),
+            "ajuizamento": _data_ajuizamento(s.get("dataAjuizamento")),
+            "atualizado": s.get("dataHoraUltimaAtualizacao"),
+            "sigilo": s.get("nivelSigilo"),
+        }
+        for s in fontes
+    ]
+    graus = [s.get("grau") for s in fontes]
+    if not completo:
+        row = con.execute("SELECT instancias FROM processos WHERE numero=?", (numero,)).fetchone()
+        anteriores = json.loads(row["instancias"]) if row and row["instancias"] else []
+        instancias += [i for i in anteriores if i.get("grau") not in graus]
+
+    antigos = {r["chave"]: r["capturado_em"]
+               for r in con.execute("SELECT chave, capturado_em FROM movimentos WHERE numero=?", (numero,))}
+    novos_movs = []
+    for s in fontes:
+        grau = s.get("grau")
+        for m in s.get("movimentos") or []:
+            data_hora = _data_hora_mov(m.get("dataHora"))
+            comp = _complementos_texto(m)
+            chave = hashlib.sha1(f"{numero}|{grau}|{m.get('codigo')}|{data_hora}|{m.get('nome')}|{comp}".encode()).hexdigest()
+            nome = m.get("nome") or f"Movimento {m.get('codigo') or ''}".strip()
+            novos_movs.append((chave, numero, grau, m.get("codigo"), data_hora, nome, comp,
+                               (m.get("orgaoJulgador") or {}).get("nome"), antigos.get(chave) or agora()))
+    qtd_novos = len({m[0] for m in novos_movs} - set(antigos))
+
+    # Substitui os movimentos pelo retrato atual do DataJud (evita lixo se o tribunal corrigir algo)
+    if completo:
+        con.execute("DELETE FROM movimentos WHERE numero=?", (numero,))
+    else:
+        marcas = ",".join("?" * len(graus))
+        con.execute(f"DELETE FROM movimentos WHERE numero=? AND grau IN ({marcas})", (numero, *graus))
+    con.executemany("INSERT OR IGNORE INTO movimentos VALUES (?,?,?,?,?,?,?,?,?)", novos_movs)
+
+    con.execute(
+        """UPDATE processos SET orgao=?, classe=?, assuntos=?, grau=?, data_ajuizamento=?, sistema=?, instancias=?,
+           datajud_status='ok', datajud_msg=NULL, datajud_em=? WHERE numero=?""",
+        (
+            (principal.get("orgaoJulgador") or {}).get("nome"), (principal.get("classe") or {}).get("nome"),
+            json.dumps(assuntos, ensure_ascii=False), principal.get("grau"),
+            _data_ajuizamento(principal.get("dataAjuizamento")), (principal.get("sistema") or {}).get("nome"),
+            json.dumps(instancias, ensure_ascii=False), agora(), numero,
+        ),
+    )
+    if qtd_novos:
+        con.execute("UPDATE processos SET novidade_em=? WHERE numero=?", (agora(), numero))
+    return qtd_novos
+
+
+def marcar_datajud(con, numero: str, status: str, msg: str | None = None):
+    if status == "erro":
+        # Falha temporária não apaga dados já obtidos: mantém 'ok' e só guarda a mensagem
+        con.execute("""UPDATE processos SET datajud_msg=?,
+                       datajud_status=CASE WHEN datajud_status='ok' THEN 'ok' ELSE 'erro' END WHERE numero=?""",
+                    (f"Última consulta falhou: {msg}", numero))
+        return
+    con.execute("UPDATE processos SET datajud_status=?, datajud_msg=?, datajud_em=? WHERE numero=?",
+                (status, msg, agora(), numero))
+
+
+# --- resumo por processo ---------------------------------------------------
+
+def recalcular_resumo(con, numero: str):
+    """Atualiza colunas de 'última movimentação/publicação', órgão/classe de reserva e texto de busca."""
+    p = con.execute("SELECT * FROM processos WHERE numero=?", (numero,)).fetchone()
+    if not p:
+        return
+    mov = con.execute(
+        "SELECT data_hora, nome, complementos FROM movimentos WHERE numero=? ORDER BY data_hora DESC LIMIT 1",
+        (numero,)).fetchone()
+    pub = con.execute(
+        "SELECT data_disp, tipo, orgao, classe, texto FROM comunicacoes WHERE numero=? ORDER BY data_disp DESC, djen_id DESC LIMIT 1",
+        (numero,)).fetchone()
+
+    ult_mov_data = mov["data_hora"] if mov else None
+    ult_mov_texto = None
+    if mov:
+        ult_mov_texto = (mov["nome"] or "Movimento") + (f" ({mov['complementos']})" if mov["complementos"] else "")
+    ult_pub_data = pub["data_disp"] if pub else None
+    ult_pub_texto = f"{pub['tipo'] or 'Publicação'}: {txt.resumo(pub['texto'])}" if pub else None
+    ult_atividade = max(filter(None, [ult_mov_data, ult_pub_data]), default=None)
+
+    # Sem DataJud, usa órgão e classe da publicação mais recente
+    orgao = p["orgao"] or (pub["orgao"] if pub else None)
+    classe = p["classe"] or (pub["classe"].lower().capitalize() if pub and pub["classe"] else None)
+
+    partes = json.loads(p["partes"]) if p["partes"] else {}
+    assuntos = json.loads(p["assuntos"]) if p["assuntos"] else []
+    busca = normalizar(" ".join(filter(None, [
+        numero, cnj.formatar(numero), p["tribunal"], orgao, classe, " ".join(assuntos),
+        " ".join(n for nomes in partes.values() for n in nomes),
+    ])))
+    con.execute(
+        """UPDATE processos SET ult_mov_data=?, ult_mov_texto=?, ult_pub_data=?, ult_pub_texto=?, ult_atividade=?,
+           orgao=?, classe=?, busca=? WHERE numero=?""",
+        (ult_mov_data, ult_mov_texto, ult_pub_data, ult_pub_texto, ult_atividade, orgao, classe, busca, numero),
+    )
+
+
+# --- consultas para a interface --------------------------------------------
+
+def listar(con, tribunal="", orgao="", q="", de="", ate="", so_novidades=False) -> list[dict]:
+    sql = ["SELECT * FROM processos WHERE 1=1"]
+    args: list = []
+    if tribunal:
+        sql.append("AND tribunal=?")
+        args.append(tribunal)
+    if orgao:
+        sql.append("AND orgao=?")
+        args.append(orgao)
+    if q:
+        termo = normalizar(q).strip()
+        digitos = cnj.so_digitos(q)
+        cond = ["busca LIKE ?", "numero IN (SELECT numero FROM comunicacoes WHERE busca LIKE ?)"]
+        args += [f"%{termo}%", f"%{termo}%"]
+        if len(digitos) >= 4 and len(digitos) >= len(q.strip()) * 0.6:
+            cond.append("numero LIKE ?")
+            args.append(f"%{digitos}%")
+        sql.append("AND (" + " OR ".join(cond) + ")")
+    if de or ate:
+        de_, ate_ = de or "0000-00-00", (ate or "9999-12-31") + "T99"
+        sql.append("""AND (numero IN (SELECT numero FROM comunicacoes WHERE data_disp BETWEEN ? AND ?)
+                      OR numero IN (SELECT numero FROM movimentos WHERE data_hora BETWEEN ? AND ?))""")
+        args += [de_, ate_, de_, ate_]
+    if so_novidades:
+        sql.append("AND novidade_em IS NOT NULL AND (visto_em IS NULL OR novidade_em > visto_em)")
+    sql.append("ORDER BY ult_atividade IS NULL, ult_atividade DESC, criado_em DESC")
+    return [_processo_dict(r) for r in con.execute(" ".join(sql), args)]
+
+
+def _processo_dict(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    d.pop("busca", None)
+    d["numero_fmt"] = cnj.formatar(d["numero"])
+    d["partes"] = json.loads(d["partes"]) if d.get("partes") else {}
+    d["assuntos"] = json.loads(d["assuntos"]) if d.get("assuntos") else []
+    d["instancias"] = json.loads(d["instancias"]) if d.get("instancias") else []
+    d["novo"] = bool(d.get("novidade_em") and (not d.get("visto_em") or d["novidade_em"] > d["visto_em"]))
+    return d
+
+
+def detalhe(con, numero: str) -> dict | None:
+    r = con.execute("SELECT * FROM processos WHERE numero=?", (numero,)).fetchone()
+    if not r:
+        return None
+    p = _processo_dict(r)
+    visto = p["visto_em"]
+
+    def novo(capturado):  # só destaca eventos depois da última vez que marcou como visto
+        return bool(visto and capturado and capturado > visto)
+
+    eventos = []
+    for c in con.execute("SELECT * FROM comunicacoes WHERE numero=? ORDER BY data_disp DESC", (numero,)):
+        eventos.append({
+            "fonte": "djen", "data": c["data_disp"], "titulo": c["tipo"] or "Publicação",
+            "orgao": c["orgao"], "texto": c["texto"], "link": c["link"], "documento": c["tipo_documento"],
+            "resumo": txt.resumo(c["texto"], 360), "novo": novo(c["capturado_em"]),
+            "destinatarios": [d.get("nome") for d in json.loads(c["destinatarios"] or "[]") if d.get("nome")],
+        })
+    for m in con.execute("SELECT * FROM movimentos WHERE numero=? ORDER BY data_hora DESC", (numero,)):
+        eventos.append({
+            "fonte": "datajud", "data": m["data_hora"], "titulo": m["nome"], "complementos": m["complementos"],
+            "orgao": m["orgao"], "grau": m["grau"], "novo": novo(m["capturado_em"]),
+        })
+    eventos.sort(key=lambda e: e["data"] or "", reverse=True)
+    p["eventos"] = eventos
+    return p
+
+
+def opcoes_filtros(con) -> dict:
+    tribunais = [r[0] for r in con.execute("SELECT DISTINCT tribunal FROM processos WHERE tribunal IS NOT NULL ORDER BY tribunal")]
+    orgaos = [{"tribunal": r[0], "orgao": r[1]} for r in con.execute(
+        "SELECT DISTINCT tribunal, orgao FROM processos WHERE orgao IS NOT NULL ORDER BY orgao COLLATE NOCASE")]
+    return {"tribunais": tribunais, "orgaos": orgaos}

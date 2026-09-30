@@ -1,0 +1,11 @@
+# Dados dos processos (nomes de partes, textos de intimações): ficam só no computador de quem usa
+db/
+logs/
+
+# Ambiente Python
+.venv/
+__pycache__/
+*.pyc
+
+# Configuração local opcional
+.env

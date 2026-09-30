@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meus processos</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232451b3'/><path d='M9 8h10l4 4v12H9z' fill='white'/><path d='M12 15h8M12 19h8' stroke='%232451b3' stroke-width='2'/></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topo">
+    <div class="marca">
+      <h1>Meus processos</h1>
+      <p class="sub" id="identidade">&nbsp;</p>
+    </div>
+    <div class="acoes">
+      <span class="ultima" id="ultima">&nbsp;</span>
+      <button class="btn" id="btn-adicionar" type="button">+ Adicionar processos</button>
+      <button class="btn primario" id="btn-atualizar" type="button">⟳ Atualizar tudo</button>
+      <button class="btn icone" id="btn-config" type="button" title="Configurações" aria-label="Configurações">⚙</button>
+    </div>
+  </header>
+
+  <main class="conteudo">
+    <section class="faixa progresso" id="progresso" hidden>
+      <div class="progresso-topo">
+        <strong id="prog-fase">Atualizando…</strong>
+        <span id="prog-conta"></span>
+      </div>
+      <div class="barra"><div class="barra-cheia" id="prog-barra"></div></div>
+      <div class="prog-msg" id="prog-msg"></div>
+    </section>
+
+    <section class="faixa alerta" id="aviso-chave" hidden>
+      Chave do DataJud não configurada: classe, assuntos e movimentações não serão buscados.
+      <button class="link" type="button" data-abrir-config>Configurar agora</button>
+    </section>
+
+    <section class="faixa resultado" id="resultado-sync" hidden>
+      <div><strong>Última atualização:</strong> <span id="res-texto"></span></div>
+      <details id="res-erros" hidden>
+        <summary id="res-erros-titulo"></summary>
+        <div id="res-erros-lista"></div>
+      </details>
+    </section>
+
+    <section class="filtros" aria-label="Filtros">
+      <input type="search" id="f-q" class="campo busca" placeholder="Buscar por número, parte ou palavra da publicação" autocomplete="off">
+      <select id="f-tribunal" class="campo"><option value="">Todos os tribunais</option></select>
+      <select id="f-orgao" class="campo"><option value="">Todas as varas / órgãos</option></select>
+      <label class="periodo">De <input type="date" id="f-de" class="campo"></label>
+      <label class="periodo">até <input type="date" id="f-ate" class="campo"></label>
+      <label class="chk"><input type="checkbox" id="f-novidades"> Só com novidades</label>
+      <button class="link" id="btn-limpar" type="button" hidden>Limpar filtros</button>
+    </section>
+
+    <div class="contagem">
+      <span id="contagem">Carregando…</span>
+      <button class="link" id="btn-vistos" type="button" hidden>Marcar todos como vistos</button>
+    </div>
+
+    <table class="tabela">
+      <colgroup>
+        <col class="c-proc"><col class="c-trib"><col class="c-orgao"><col class="c-classe"><col class="c-mov"><col class="c-pub">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Processo</th><th>Tribunal</th><th>Vara / Órgão</th><th>Classe</th>
+          <th>Última movimentação</th><th>Última publicação</th>
+        </tr>
+      </thead>
+      <tbody id="linhas"></tbody>
+    </table>
+    <div class="vazio" id="vazio" hidden></div>
+  </main>
+
+  <footer class="aviso-fixo">
+    A busca automática por OAB só encontra processos com publicação no DJEN; use “Adicionar processos” para os demais.
+  </footer>
+
+  <!-- Painel lateral com a linha do tempo -->
+  <div class="fundo" id="fundo" hidden></div>
+  <aside class="painel" id="painel" aria-hidden="true" tabindex="-1">
+    <div class="painel-topo">
+      <div>
+        <div class="painel-num"><span id="p-numero"></span>
+          <button class="link pequeno" id="p-copiar" type="button">copiar</button></div>
+        <div class="painel-sub" id="p-sub"></div>
+      </div>
+      <button class="btn icone" id="p-fechar" type="button" aria-label="Fechar">✕</button>
+    </div>
+    <div class="painel-corpo" id="p-corpo"></div>
+  </aside>
+
+  <!-- Adicionar processos -->
+  <dialog id="dlg-adicionar" class="dialogo">
+    <form method="dialog" id="form-adicionar">
+      <h2>Adicionar processos</h2>
+      <p class="ajuda">Cole um ou vários números CNJ (um por linha, com ou sem pontos e traços), ou importe um arquivo CSV/TXT.
+        Os números são reconhecidos automaticamente, mesmo no meio de outros textos.</p>
+      <textarea id="add-texto" rows="8" placeholder="0001234-56.2024.8.16.0001&#10;50012345620248210001"></textarea>
+      <div class="linha-arquivo">
+        <label class="btn">Importar CSV/TXT <input type="file" id="add-arquivo" accept=".csv,.txt,text/plain,text/csv" hidden></label>
+        <span id="add-arquivo-nome" class="ajuda"></span>
+      </div>
+      <div id="add-resultado" class="add-resultado" hidden></div>
+      <div class="dialogo-acoes">
+        <button class="btn" value="cancelar" type="submit" formnovalidate>Fechar</button>
+        <button class="btn primario" id="add-enviar" type="button">Adicionar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Configurações -->
+  <dialog id="dlg-config" class="dialogo">
+    <form method="dialog">
+      <h2>Configurações</h2>
+      <p class="ajuda" id="cfg-ident"></p>
+      <label class="rotulo" for="cfg-chave">Chave pública do DataJud</label>
+      <input type="text" id="cfg-chave" class="campo largo" autocomplete="off" spellcheck="false" placeholder="cole aqui a chave (APIKey …)">
+      <p class="ajuda" id="cfg-chave-status"></p>
+      <p class="ajuda">A chave vigente fica na wiki do CNJ:
+        <a href="https://datajud-wiki.cnj.jus.br/api-publica/acesso" target="_blank" rel="noopener">datajud-wiki.cnj.jus.br/api-publica/acesso</a>.
+        Copie o texto que vem depois de “APIKey” e cole acima.</p>
+      <label class="rotulo" for="cfg-dias">Na primeira atualização, buscar publicações dos últimos</label>
+      <div><input type="number" id="cfg-dias" class="campo curto" min="1" max="730"> dias</div>
+      <div class="dialogo-acoes">
+        <button class="btn" value="cancelar" type="submit" formnovalidate>Cancelar</button>
+        <button class="btn primario" id="cfg-salvar" type="button">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="aviso-toast" id="toast" role="status" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
