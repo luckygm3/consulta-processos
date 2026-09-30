@@ -16,12 +16,26 @@ Roda só no seu computador (http://127.0.0.1:8000). Sem login, sem nuvem, sem ce
 
 (Quem tem git pode usar `git clone` em vez do ZIP.)
 
+## Instalar num Mac
+
+1. **Instale o Python (uma vez só):** abra https://www.python.org/downloads/, clique no botão amarelo
+   “Download Python 3.x”, abra o arquivo `.pkg` baixado e siga o instalador (ele pede a senha do Mac).
+   O Python que já vem no Mac é antigo demais e não serve.
+2. No GitHub, clique em **Code → Download ZIP**. O Safari normalmente já descompacta; se não, dê dois cliques no ZIP.
+   Mova a pasta para **Documentos** (para não se perder na pasta Downloads).
+3. Abra a pasta e dê dois cliques em **`abrir-no-mac.command`**.
+   - Na primeira vez o Mac bloqueia (“não pode ser aberto porque é de um desenvolvedor não identificado” ou
+     “a Apple não pôde verificar…”). Clique em **OK/Concluído**, vá em **Ajustes do Sistema → Privacidade e Segurança**,
+     role até o fim e clique em **Abrir Mesmo Assim** (no macOS 14 ou anterior, também funciona Control+clique
+     no arquivo → **Abrir** → **Abrir**). Depois disso, os dois cliques funcionam direto.
+   - Se preferir evitar o aviso: abra o app **Terminal**, digite `sh ` (com um espaço no fim), arraste o arquivo
+     `run.sh` da pasta para dentro da janela do Terminal e aperte Enter.
+4. Na primeira vez ele prepara tudo (1–3 min) e abre o navegador em http://127.0.0.1:8000. Clique em **Atualizar tudo**.
+
 ## Como rodar no dia a dia
 
-**Windows:** dois cliques em `run.bat`. O navegador abre sozinho.
-**Deixe a janela preta aberta** enquanto usa o app; para encerrar, feche-a.
-
-**Linux/Mac:** `sh run.sh` (requer Python 3.11+).
+**Windows:** dois cliques em `run.bat`. **Mac:** dois cliques em `abrir-no-mac.command`. **Linux:** `sh run.sh`.
+O navegador abre sozinho. **Deixe a janela preta (Terminal) aberta** enquanto usa o app; para encerrar, feche-a.
 
 ## Chave do DataJud
 
