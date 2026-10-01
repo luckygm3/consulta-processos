@@ -5,13 +5,13 @@ import logging
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 
 from . import cnj, config, texto as txt
 from .config import DB_DIR, DB_PATH
 
 log = logging.getLogger("db")
-SCHEMA_VERSAO = 2  # 2 = várias advogadas
+SCHEMA_VERSAO = 3  # 2 = várias advogadas; 3 = agenda/prazos
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS processos (
@@ -104,6 +104,59 @@ CREATE TABLE IF NOT EXISTS comunicacao_advogada (  -- qual busca por OAB trouxe 
     advogada_id       INTEGER NOT NULL,
     PRIMARY KEY (hash, advogada_id)
 );
+CREATE TABLE IF NOT EXISTS feriados (            -- calendário forense editável (feriados, suspensões, recesso)
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    inicio            TEXT NOT NULL,         -- YYYY-MM-DD (ou MM-DD se recorrente)
+    fim               TEXT,                  -- idem; NULL = um dia só
+    descricao         TEXT NOT NULL,
+    tipo              TEXT NOT NULL,         -- feriado | suspensao | recesso | expediente_reduzido
+    tribunais         TEXT,                  -- siglas separadas por vírgula; vazio = todos
+    comarca           TEXT,                  -- vazio = todas; senão casa com o nome do órgão do processo
+    recorrente        INTEGER DEFAULT 0,     -- 1 = repete todo ano (datas em MM-DD)
+    origem            TEXT,                  -- 'padrao' (pré-preenchido, conferir) ou 'manual'
+    ativo             INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS ix_feriados_inicio ON feriados(inicio);
+CREATE TABLE IF NOT EXISTS tipos_ato (           -- tabela editável: palavras-chave -> nome do ato e prazo padrão
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ordem             INTEGER,
+    nome              TEXT NOT NULL,
+    palavras          TEXT NOT NULL,         -- separadas por ';' (comparadas sem acento e em minúsculas)
+    dias              INTEGER,
+    contagem          TEXT,                  -- uteis | corridos
+    justica           TEXT,                  -- vazio = qualquer; 'trabalho' = só TRT/TST
+    ativo             INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS tarefas (             -- cartões da agenda/kanban
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    titulo            TEXT NOT NULL,
+    tipo              TEXT DEFAULT 'tarefa', -- prazo | tarefa | audiencia
+    status            TEXT DEFAULT 'a_fazer',-- sugerido | a_fazer | andamento | aguardando | concluido | descartado
+    numero            TEXT,                  -- processo vinculado (opcional)
+    advogada_id       INTEGER,               -- responsável (NULL = as duas / a definir)
+    prazo_fatal       TEXT,
+    data_interna      TEXT,
+    hora              TEXT,                  -- audiências
+    prioridade        TEXT DEFAULT 'media',  -- alta | media | baixa
+    observacoes       TEXT,
+    checklist         TEXT,                  -- JSON [{"texto", "feito"}]
+    origem            TEXT DEFAULT 'manual', -- manual | djen
+    comunicacao_hash  TEXT,
+    trecho            TEXT,                  -- trecho da publicação que gerou a sugestão
+    calculo           TEXT,                  -- JSON: memória de cálculo
+    conferir          INTEGER DEFAULT 0,     -- 1 = detecção incerta, conferir manualmente
+    aviso             TEXT,
+    criado_em         TEXT,
+    atualizado_em     TEXT,
+    concluido_em      TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_tarefas_status ON tarefas(status, prazo_fatal);
+CREATE TABLE IF NOT EXISTS comunicacao_analise ( -- publicações já varridas por "Verificar prazos" (não duplica)
+    hash              TEXT PRIMARY KEY,
+    analisado_em      TEXT,
+    resultado         TEXT,                  -- prazo | sem_prazo | ja_vencido | erro
+    detalhe           TEXT
+);
 """
 
 
@@ -157,9 +210,42 @@ def _backup_antes_de_migrar():
 
 
 def _migrar(con):
+    versao = _versao(con)
+    if versao < 2:
+        _migrar_v2(con)
+    if versao < 3:
+        # v2 -> v3 (agenda): contagem de prazo por processo (NULL = padrão) e tabela de tipos de ato
+        colunas = [r["name"] for r in con.execute("PRAGMA table_info(processos)")]
+        if "contagem" not in colunas:
+            con.execute("ALTER TABLE processos ADD COLUMN contagem TEXT")
+        from .extrair import TIPOS_PADRAO
+        if not con.execute("SELECT 1 FROM tipos_ato LIMIT 1").fetchone():
+            con.executemany("INSERT INTO tipos_ato(ordem, nome, palavras, dias, contagem, justica) VALUES(?,?,?,?,?,?)",
+                            [(i, *t) for i, t in enumerate(TIPOS_PADRAO, start=1)])
+        log.info("Migração do banco: agenda e prazos")
+    if versao < SCHEMA_VERSAO:
+        meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
+    semear_feriados(con)
+
+
+def semear_feriados(con, hoje: date | None = None):
+    """Pré-preenche o calendário do ano passado até daqui a 2 anos. Cada ano só uma vez: o que ela apagar ou
+    editar não volta."""
+    from .prazos import feriados_padrao
+    ano = (hoje or date.today()).year
+    for a in range(ano - 1, ano + 3):
+        chave = f"feriados_padrao:{a}"
+        if meta_get(con, chave):
+            continue
+        con.executemany(
+            """INSERT INTO feriados(inicio, fim, descricao, tipo, tribunais, comarca, recorrente, origem)
+               VALUES(:inicio, :fim, :descricao, :tipo, :tribunais, :comarca, :recorrente, :origem)""",
+            feriados_padrao(a))
+        meta_set(con, chave, agora())
+
+
+def _migrar_v2(con):
     """v1 -> v2: tudo o que já existia passa a ser da primeira advogada (a OAB que estava configurada)."""
-    if _versao(con) >= SCHEMA_VERSAO:
-        return
     lista = advogadas(con)
     if lista:
         dona = lista[0]
@@ -173,7 +259,6 @@ def _migrar(con):
             meta_set(con, chave_marco(dona), ultima)
         qtd = con.execute("SELECT COUNT(*) FROM processo_advogada WHERE advogada_id=?", (dona["id"],)).fetchone()[0]
         log.info("Migração do banco: %d processos vinculados a %s", qtd, dona["nome"])
-    meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
 
 
 @contextmanager

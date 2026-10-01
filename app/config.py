@@ -30,6 +30,11 @@ DEFAULTS = {
     "backfill_dias": 180,
     "janela_dias": 30,
     "buscar_tambem_por_nome": False,
+    # Prazos (ver app/prazos.py). regra_publicacao: "djen" = publicação no 1º dia útil após a disponibilização;
+    # "disponibilizacao" = publicação no próprio dia. dias_internos: data interna = N dias úteis antes do fatal.
+    "prazos_regra_publicacao": "djen",
+    "prazos_dias_internos": 2,
+    "prazos_contagem_padrao": "uteis",
     "porta": 8000,
 }
 

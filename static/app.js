@@ -280,6 +280,10 @@ function renderPainel(p) {
     ["Advogada(s)", p.advogadas.map(advogadaPorId).filter(Boolean).map((a) => `${etiquetaAdv(a)} ${esc(a.nome)}`).join("<br>")],
     ["Origem", p.origem === "manual" ? "Adicionado manualmente" : "Encontrado pelas publicações do DJEN"],
     ["DataJud consultado", fmtDataHora(p.datajud_em)],
+    ["Contagem de prazos", `<select id="pa-contagem" class="campo mini">
+      <option value="">padrão (dias úteis, ou o do tipo de ato)</option>
+      <option value="uteis" ${p.contagem === "uteis" ? "selected" : ""}>sempre dias úteis</option>
+      <option value="corridos" ${p.contagem === "corridos" ? "selected" : ""}>sempre dias corridos</option></select>`],
   ].filter(([, v]) => v);
 
   const eventos = p.eventos;
@@ -290,6 +294,7 @@ function renderPainel(p) {
     <div class="painel-acoes">
       <button class="btn ${p.novo ? "primario" : ""}" type="button" id="pa-visto" ${p.novo ? "" : "disabled"}>${p.novo ? "✓ Marcar como visto" : "✓ Visto"}</button>
       <button class="btn" type="button" id="pa-atualizar">⟳ Atualizar este processo</button>
+      <button class="btn" type="button" id="pa-tarefa">+ Tarefa / prazo</button>
       <button class="btn perigo" type="button" id="pa-remover">Remover da lista</button>
     </div>
     ${nota}
@@ -305,6 +310,14 @@ function renderPainel(p) {
 
   $("#pa-visto").onclick = () => marcarVisto(p.numero);
   $("#pa-atualizar").onclick = () => atualizarUm(p.numero);
+  $("#pa-tarefa").onclick = () => abrirTarefa(null, {
+    numero: p.numero, numero_fmt: p.numero_fmt, tipo: "prazo",
+    advogada_id: p.advogadas.length === 1 ? p.advogadas[0] : null,
+  });
+  $("#pa-contagem").onchange = async (ev) => {
+    await api(`/api/processos/${p.numero}/contagem`, { method: "POST", body: JSON.stringify({ contagem: ev.target.value }) });
+    toast("Contagem salva: vale para os próximos cálculos deste processo.");
+  };
   $("#pa-remover").onclick = () => removerProcesso(p);
   $("#p-corpo").querySelectorAll("[data-aba]").forEach((b) => {
     b.onclick = () => {

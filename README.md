@@ -63,6 +63,47 @@ O DJEN (publicações) não precisa de chave.
 - **NOVO** marca processos com publicação ou movimento capturado depois da última vez que você marcou como visto.
 - Clique num processo para ver a linha do tempo (publicações + movimentos) e o texto completo das publicações.
 
+## Agenda e prazos (aba “Agenda”)
+
+> **Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal.**
+
+- Três visões: **Kanban** (Sugeridos → A fazer → Em andamento → Aguardando terceiros → Concluído; arraste os cartões),
+  **Calendário** (mês/semana, com feriados) e **Lista por data**. Filtros por advogada, processo, status e período.
+- Cores por urgência: vermelho = vencido; laranja = vence hoje/próximo dia útil; amarelo = até 5 dias úteis; verde = folgado.
+- **+ Nova tarefa**: qualquer tarefa, com ou sem processo, com checklist, prioridade e observações. No painel de um
+  processo há o atalho **+ Tarefa / prazo**. O quadro “Calcular prazo” calcula o fatal a partir da disponibilização.
+- **Verificar prazos** (sem IA): lê as publicações do DJEN ainda não analisadas, procura expressões como “prazo de
+  quinze (15) dias”, “em 48 horas”, “5 dias úteis”, “manifeste-se”, “contestar”, “intime-se para”, reconhece o ato
+  (contestação, apelação, embargos de declaração…) e cria cartões em **Sugeridos** com o trecho original, o link da
+  publicação e a memória de cálculo. **Confirmar** (um ou em lote) leva para “A fazer”; **Descartar** guarda a decisão
+  (a publicação não sugere de novo). Detecções incertas vêm marcadas “conferir manualmente”. Por padrão, publicações
+  cujo prazo já venceu não viram cartão (há uma opção para incluí-las). Audiências com data no texto também viram cartão.
+- **Tipos de ato**: tabela editável (palavras-chave → nome do ato e prazo padrão). O prazo padrão só é usado quando o
+  texto não traz o número de dias; sem nenhuma indicação, vale o CPC art. 218 §3º (5 dias).
+- **Feriados**: tabela editável por tribunal ou comarca (feriado municipal: preencha a comarca como aparece no nome da
+  vara). Vem pré-preenchida para o ano passado e os próximos dois anos — **confira com o calendário oficial do tribunal**.
+- **Exportar .ics**: gera um arquivo para importar no Google Agenda (Configurações → Importar e exportar). Exporta todas
+  ou só as filtradas; sugestões não confirmadas ficam de fora.
+- Ao abrir o app, uma faixa avisa quantos prazos vencem hoje/amanhã e quantos estão vencidos.
+
+### Regras do cálculo (`app/prazos.py`)
+
+1. **Publicação**: com a regra padrão `"djen"`, considera-se publicada no 1º dia útil seguinte à disponibilização
+   (Lei 11.419/2006, art. 4º §3º; Res. CNJ 455/2022). Com `"disponibilizacao"`, no próprio dia.
+2. **Início**: 1º dia útil seguinte à publicação — exclui o dia do começo e inclui o do vencimento (CPC art. 224).
+3. **Dias úteis** por padrão (CPC art. 219). Dá para usar **dias corridos** por tipo de ato ou por processo (no painel).
+   Em dias corridos, se o último dia não for útil, prorroga para o próximo dia útil.
+4. Não contam: fins de semana, feriados e suspensões da tabela (filtrados pelo tribunal e pela comarca do processo)
+   e o **recesso de 20/12 a 20/01** (CPC art. 220), que suspende a contagem.
+5. Dias de **expediente reduzido** (ex.: Quarta-feira de Cinzas) contam, mas começo/vencimento nesses dias são
+   prorrogados (CPC art. 224 §1º).
+6. **Data interna** = N dias úteis antes do fatal (padrão 2).
+7. Prazo em horas é convertido em dias corridos e marcado para conferência. Prazo em dobro não é aplicado
+   automaticamente (só um aviso quando o texto menciona).
+
+Testes do cálculo e da detecção: `.venv\Scripts\python -m unittest discover -s tests -t . -v`
+(no Mac/Linux: `.venv/bin/python -m unittest discover -s tests -t . -v`).
+
 ## Configuração (`config.json`)
 
 | campo | significado |
@@ -73,6 +114,9 @@ O DJEN (publicações) não precisa de chave.
 | `janela_dias` | tamanho de cada consulta ao DJEN (padrão 30) |
 | `buscar_tambem_por_nome` | também busca por nome, além da OAB (padrão `false`; nos testes os resultados foram iguais). Só vale para nomes com nome e sobrenome |
 | `porta` | porta local (padrão 8000) |
+| `prazos_regra_publicacao` | `"djen"` (publicação = 1º dia útil após a disponibilização, padrão) ou `"disponibilizacao"` |
+| `prazos_dias_internos` | data interna sugerida: quantos dias úteis antes do prazo fatal (padrão 2) |
+| `prazos_contagem_padrao` | `"uteis"` (padrão) ou `"corridos"` |
 
 ## Limitações
 
@@ -93,8 +137,10 @@ O DJEN (publicações) não precisa de chave.
 ## Arquivos
 
 ```
-app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, texto.py, main.py
-static/     interface (HTML/CSS/JS puro)
+app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, texto.py, main.py;
+            agenda: prazos.py (calendário e cálculo), extrair.py (regex), agenda.py, rotas_agenda.py
+static/     interface (HTML/CSS/JS puro; agenda.js = aba Agenda)
+tests/      testes do cálculo de prazos e da detecção no texto
 db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git.
             Antes de mudar a estrutura do banco, o app guarda uma cópia (processos.sqlite3.bak-AAAAMMDD)
 logs/       app.log (erros de rede e dos tribunais)

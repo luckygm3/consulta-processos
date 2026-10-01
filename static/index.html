@@ -13,6 +13,10 @@
       <h1>Meus processos</h1>
       <p class="sub" id="identidade">&nbsp;</p>
     </div>
+    <nav class="abas abas-app" aria-label="Telas">
+      <button type="button" data-tela="processos" class="ativa">Processos</button>
+      <button type="button" data-tela="agenda">Agenda <span class="qtd-aba" id="qtd-aba-agenda" hidden></span></button>
+    </nav>
     <div class="acoes">
       <span class="ultima" id="ultima">&nbsp;</span>
       <button class="btn" id="btn-adicionar" type="button">+ Adicionar processos</button>
@@ -22,6 +26,11 @@
   </header>
 
   <main class="conteudo">
+    <section class="faixa alerta alerta-prazos" id="alerta-prazos" hidden>
+      <span id="alerta-prazos-texto"></span>
+      <button class="link" type="button" id="alerta-prazos-ver">Ver na agenda</button>
+    </section>
+
     <section class="faixa progresso" id="progresso" hidden>
       <div class="progresso-topo">
         <strong id="prog-fase">Atualizando…</strong>
@@ -44,6 +53,7 @@
       </details>
     </section>
 
+    <div id="tela-processos">
     <section class="filtros" aria-label="Filtros">
       <div class="abas f-adv" id="f-advogada" role="group" aria-label="Advogada" hidden></div>
       <input type="search" id="f-q" class="campo busca" placeholder="Buscar por número, parte ou palavra da publicação" autocomplete="off">
@@ -73,10 +83,66 @@
       <tbody id="linhas"></tbody>
     </table>
     <div class="vazio" id="vazio" hidden></div>
+    </div>
+
+    <!-- Agenda / Kanban de prazos -->
+    <div id="tela-agenda" hidden>
+      <div class="ag-topo">
+        <div class="abas" id="ag-visao" role="tablist">
+          <button type="button" data-visao="kanban" class="ativa">Kanban</button>
+          <button type="button" data-visao="calendario">Calendário</button>
+          <button type="button" data-visao="lista">Lista por data</button>
+        </div>
+        <div class="ag-acoes">
+          <button class="btn" type="button" id="ag-nova">+ Nova tarefa</button>
+          <button class="btn primario" type="button" id="ag-verificar">✓ Verificar prazos</button>
+          <button class="btn" type="button" id="ag-ics">Exportar .ics</button>
+          <button class="btn" type="button" id="ag-feriados">Feriados</button>
+          <button class="btn" type="button" id="ag-tipos">Tipos de ato</button>
+        </div>
+      </div>
+      <div class="ag-contadores" id="ag-contadores"></div>
+      <section class="filtros" aria-label="Filtros da agenda">
+        <select id="ag-f-adv" class="campo"><option value="">Todas as advogadas</option></select>
+        <input type="search" id="ag-f-proc" class="campo" list="ag-processos" placeholder="Processo (número ou parte)" autocomplete="off">
+        <datalist id="ag-processos"></datalist>
+        <select id="ag-f-status" class="campo">
+          <option value="">Todos os status</option>
+          <option value="abertos">Em aberto (menos concluídos)</option>
+          <option value="sugerido">Sugeridos</option>
+          <option value="a_fazer">A fazer</option>
+          <option value="andamento">Em andamento</option>
+          <option value="aguardando">Aguardando terceiros</option>
+          <option value="concluido">Concluídos</option>
+        </select>
+        <label class="periodo">Prazo de <input type="date" id="ag-f-de" class="campo"></label>
+        <label class="periodo">até <input type="date" id="ag-f-ate" class="campo"></label>
+        <button class="link" id="ag-limpar" type="button" hidden>Limpar filtros</button>
+      </section>
+      <div id="ag-kanban" class="kanban"></div>
+      <div id="ag-calendario" hidden>
+        <div class="cal-topo">
+          <div class="cal-nav">
+            <button class="btn icone" type="button" data-cal="-1" aria-label="Anterior">‹</button>
+            <button class="btn" type="button" data-cal="0">Hoje</button>
+            <button class="btn icone" type="button" data-cal="1" aria-label="Próximo">›</button>
+            <strong id="cal-titulo"></strong>
+          </div>
+          <div class="abas" id="cal-modo">
+            <button type="button" data-modo="mes" class="ativa">Mês</button>
+            <button type="button" data-modo="semana">Semana</button>
+          </div>
+        </div>
+        <div class="cal-grade" id="cal-grade"></div>
+        <p class="ajuda">Dois cliques num dia criam uma tarefa com essa data. Contorno tracejado = data interna.</p>
+      </div>
+      <div id="ag-lista" class="ag-lista" hidden></div>
+    </div>
   </main>
 
   <footer class="aviso-fixo">
-    A busca automática por OAB só encontra processos com publicação no DJEN; use “Adicionar processos” para os demais.
+    <span id="rodape-processos">A busca automática por OAB só encontra processos com publicação no DJEN; use “Adicionar processos” para os demais.</span>
+    <span id="rodape-agenda">Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal.</span>
   </footer>
 
   <!-- Painel lateral com a linha do tempo -->
@@ -139,8 +205,115 @@
     </form>
   </dialog>
 
+  <!-- Tarefa / prazo (criar, editar, confirmar sugestão) -->
+  <dialog id="dlg-tarefa" class="dialogo largo">
+    <form method="dialog" id="form-tarefa">
+      <h2 id="t-titulo-dlg">Tarefa</h2>
+      <div class="nota erro" id="t-aviso" hidden></div>
+      <div class="grade-form">
+        <label class="rotulo col2">Título <input type="text" id="t-titulo" class="campo largo-txt" required></label>
+        <label class="rotulo">Tipo
+          <select id="t-tipo" class="campo"><option value="prazo">Prazo</option><option value="tarefa">Tarefa</option><option value="audiencia">Audiência</option></select></label>
+        <label class="rotulo">Status <select id="t-status" class="campo"></select></label>
+        <label class="rotulo">Processo (opcional) <input type="text" id="t-numero" class="campo" list="ag-processos" placeholder="0000000-00.0000.0.00.0000" autocomplete="off"></label>
+        <label class="rotulo">Responsável <select id="t-adv" class="campo"></select></label>
+        <label class="rotulo">Prazo fatal <input type="date" id="t-fatal" class="campo"></label>
+        <label class="rotulo">Data interna <input type="date" id="t-interna" class="campo"></label>
+        <label class="rotulo">Hora (audiência) <input type="time" id="t-hora" class="campo"></label>
+        <label class="rotulo">Prioridade
+          <select id="t-prio" class="campo"><option value="alta">Alta</option><option value="media">Média</option><option value="baixa">Baixa</option></select></label>
+      </div>
+      <fieldset class="calc-box">
+        <legend>Calcular prazo</legend>
+        <div class="calc-linha">
+          Disponibilizado no DJEN em <input type="date" id="t-disp" class="campo">
+          + <input type="number" id="t-dias" class="campo curto" min="1" max="365"> dias
+          <select id="t-contagem" class="campo"><option value="">contagem do processo/padrão</option><option value="uteis">úteis</option><option value="corridos">corridos</option></select>
+          <button class="btn" type="button" id="t-calcular">Calcular</button>
+        </div>
+        <div id="t-memoria" class="memoria"></div>
+      </fieldset>
+      <div id="t-trecho-box" hidden>
+        <div class="rotulo">Trecho da publicação que gerou a sugestão</div>
+        <blockquote id="t-trecho" class="trecho-pub"></blockquote>
+        <div class="ev-links"><a id="t-link" target="_blank" rel="noopener" hidden>Ver publicação no tribunal ↗</a>
+          <button class="link" type="button" id="t-abrir-proc">Abrir processo</button></div>
+      </div>
+      <label class="rotulo">Observações <textarea id="t-obs" rows="3"></textarea></label>
+      <div class="rotulo">Checklist</div>
+      <ul id="t-check" class="checklist"></ul>
+      <div class="linha-arquivo"><input type="text" id="t-check-novo" class="campo largo-txt" placeholder="Novo item e Enter">
+        <button class="btn" type="button" id="t-check-add">Adicionar</button></div>
+      <p class="ajuda aviso-prazo">Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal.</p>
+      <div class="dialogo-acoes">
+        <button class="btn perigo" type="button" id="t-excluir">Excluir</button>
+        <span class="espaco"></span>
+        <button class="btn" value="cancelar" type="submit" formnovalidate>Cancelar</button>
+        <button class="btn" type="button" id="t-salvar">Salvar</button>
+        <button class="btn primario" type="button" id="t-confirmar" hidden>Confirmar prazo</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Verificar prazos -->
+  <dialog id="dlg-verificar" class="dialogo">
+    <form method="dialog">
+      <h2>Verificar prazos</h2>
+      <p class="ajuda">Lê as publicações do DJEN ainda não analisadas e sugere prazos por regras fixas (sem IA): procura
+        expressões como “prazo de 15 (quinze) dias”, “em 48 horas”, “manifeste-se”, “contestar”, calcula o prazo fatal pelo
+        calendário de feriados e cria cartões em <strong>Sugeridos</strong>, para você confirmar, editar ou descartar.
+        Cada publicação é analisada uma única vez.</p>
+      <label class="chk"><input type="checkbox" id="v-vencidos"> Incluir também publicações cujo prazo já venceu</label>
+      <div id="v-resultado" class="add-resultado" hidden></div>
+      <div class="dialogo-acoes">
+        <button class="btn" value="cancelar" type="submit" formnovalidate>Fechar</button>
+        <button class="btn primario" type="button" id="v-rodar">Verificar agora</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Feriados e suspensões -->
+  <dialog id="dlg-feriados" class="dialogo largo">
+    <form method="dialog">
+      <h2>Feriados, suspensões e recesso</h2>
+      <p class="nota">Lista pré-preenchida com bom senso (feriados nacionais, Páscoa/Corpus Christi, Paraná, suspensões usuais
+        e recesso de 20/12 a 20/01). <strong>Confira com o calendário oficial de cada tribunal</strong>, que muda datas todo ano.
+        “Tribunais” vazio vale para todos; “Comarca” vale quando o nome aparece na vara/órgão do processo.</p>
+      <div class="linha-arquivo">
+        <label>Ano <select id="fer-ano" class="campo"></select></label>
+        <button class="btn" type="button" id="fer-novo">+ Adicionar</button>
+      </div>
+      <div class="tabela-rolagem"><table class="tabela compacta">
+        <thead><tr><th>Data</th><th>Até</th><th>Descrição</th><th>Tipo</th><th>Tribunais</th><th>Comarca</th><th>Anual</th><th></th></tr></thead>
+        <tbody id="fer-linhas"></tbody>
+      </table></div>
+      <div class="dialogo-acoes"><button class="btn" value="cancelar" type="submit" formnovalidate>Fechar</button></div>
+    </form>
+  </dialog>
+
+  <!-- Tipos de ato -->
+  <dialog id="dlg-tipos" class="dialogo largo">
+    <form method="dialog">
+      <h2>Tipos de ato e prazo padrão</h2>
+      <p class="ajuda">Usados para dar nome ao prazo e, só quando o texto não traz o número de dias, como prazo padrão.
+        A ordem importa: a primeira linha cujas palavras-chave aparecem no texto vence. Palavras separadas por “;”,
+        sem acento. “Trabalho” = vale só para TRT/TST.</p>
+      <div class="tabela-rolagem"><table class="tabela compacta">
+        <thead><tr><th>Nome</th><th>Palavras-chave</th><th>Dias</th><th>Contagem</th><th>Justiça</th><th>Ativo</th><th></th></tr></thead>
+        <tbody id="tipos-linhas"></tbody>
+      </table></div>
+      <div class="dialogo-acoes">
+        <button class="btn" type="button" id="tipos-novo">+ Linha</button>
+        <span class="espaco"></span>
+        <button class="btn" value="cancelar" type="submit" formnovalidate>Cancelar</button>
+        <button class="btn primario" type="button" id="tipos-salvar">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="aviso-toast" id="toast" role="status" hidden></div>
 
   <script src="/static/app.js"></script>
+  <script src="/static/agenda.js"></script>
 </body>
 </html>
