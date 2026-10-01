@@ -45,6 +45,7 @@
     </section>
 
     <section class="filtros" aria-label="Filtros">
+      <div class="abas f-adv" id="f-advogada" role="group" aria-label="Advogada" hidden></div>
       <input type="search" id="f-q" class="campo busca" placeholder="Buscar por número, parte ou palavra da publicação" autocomplete="off">
       <select id="f-tribunal" class="campo"><option value="">Todos os tribunais</option></select>
       <select id="f-orgao" class="campo"><option value="">Todas as varas / órgãos</option></select>
@@ -99,6 +100,10 @@
       <p class="ajuda">Cole um ou vários números CNJ (um por linha, com ou sem pontos e traços), ou importe um arquivo CSV/TXT.
         Os números são reconhecidos automaticamente, mesmo no meio de outros textos.</p>
       <textarea id="add-texto" rows="8" placeholder="0001234-56.2024.8.16.0001&#10;50012345620248210001"></textarea>
+      <fieldset class="add-adv" id="add-advogadas" hidden>
+        <legend>De quem é?</legend>
+        <div id="add-adv-opcoes"></div>
+      </fieldset>
       <div class="linha-arquivo">
         <label class="btn">Importar CSV/TXT <input type="file" id="add-arquivo" accept=".csv,.txt,text/plain,text/csv" hidden></label>
         <span id="add-arquivo-nome" class="ajuda"></span>
@@ -116,6 +121,9 @@
     <form method="dialog">
       <h2>Configurações</h2>
       <p class="ajuda" id="cfg-ident"></p>
+      <div class="rotulo">Advogadas</div>
+      <div id="cfg-advogadas"></div>
+      <p class="ajuda">Nome e cor podem ser mudados aqui. Para incluir outra advogada ou mudar a OAB, edite o arquivo config.json.</p>
       <label class="rotulo" for="cfg-chave">Chave pública do DataJud</label>
       <input type="text" id="cfg-chave" class="campo largo" autocomplete="off" spellcheck="false" placeholder="cole aqui a chave (APIKey …)">
       <p class="ajuda" id="cfg-chave-status"></p>

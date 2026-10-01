@@ -1,6 +1,6 @@
 # Meus processos
 
-Página única, local e gratuita, com todos os processos da advogada em todos os tribunais.
+Página única, local e gratuita, com todos os processos das advogadas (uma ou mais OABs) em todos os tribunais.
 Roda só no seu computador (http://127.0.0.1:8000). Sem login, sem nuvem, sem certificado digital.
 
 ## Instalar num computador novo (Windows)
@@ -53,9 +53,13 @@ O DJEN (publicações) não precisa de chave.
 
 ## Uso
 
-- **Atualizar tudo**: busca publicações no DJEN pela OAB e, em seguida, consulta cada processo no DataJud.
+- **Atualizar tudo**: busca publicações no DJEN pela OAB de cada advogada e, em seguida, consulta cada processo no DataJud.
+  Cada processo fica vinculado a quem o encontrou; se aparecer para as duas, fica com as duas.
   A primeira vez busca os últimos 180 dias (ajustável em ⚙); depois, só o que é novo.
-- **Adicionar processos**: cole vários números CNJ ou importe um CSV/TXT (os números são achados no meio do texto).
+- **Adicionar processos**: cole vários números CNJ ou importe um CSV/TXT (os números são achados no meio do texto)
+  e escolha de quem são (uma advogada ou ambas).
+- **Filtro por advogada** (Todas / cada uma), com contadores, combinável com os demais filtros. A etiqueta colorida
+  na tabela mostra quem atua em cada processo.
 - **NOVO** marca processos com publicação ou movimento capturado depois da última vez que você marcou como visto.
 - Clique num processo para ver a linha do tempo (publicações + movimentos) e o texto completo das publicações.
 
@@ -63,11 +67,11 @@ O DJEN (publicações) não precisa de chave.
 
 | campo | significado |
 |---|---|
-| `oab_numero`, `oab_uf`, `nome_advogado` | quem é buscado no DJEN |
+| `advogadas` | lista de quem é buscado no DJEN: `nome`, `oab_numero`, `oab_uf`, `cor` (nome e cor também mudam em ⚙). O formato antigo (`oab_numero`, `oab_uf`, `nome_advogado` soltos) continua aceito |
 | `datajud_api_key` | chave pública do DataJud |
 | `backfill_dias` | quantos dias buscar na primeira atualização (padrão 180) |
 | `janela_dias` | tamanho de cada consulta ao DJEN (padrão 30) |
-| `buscar_tambem_por_nome` | também busca por nome, além da OAB (padrão `false`; nos testes os resultados foram iguais) |
+| `buscar_tambem_por_nome` | também busca por nome, além da OAB (padrão `false`; nos testes os resultados foram iguais). Só vale para nomes com nome e sobrenome |
 | `porta` | porta local (padrão 8000) |
 
 ## Limitações
@@ -91,7 +95,8 @@ O DJEN (publicações) não precisa de chave.
 ```
 app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, texto.py, main.py
 static/     interface (HTML/CSS/JS puro)
-db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git
+db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git.
+            Antes de mudar a estrutura do banco, o app guarda uma cópia (processos.sqlite3.bak-AAAAMMDD)
 logs/       app.log (erros de rede e dos tribunais)
 config.json configuração editável
 ```

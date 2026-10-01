@@ -1,5 +1,6 @@
 """Servidor local (FastAPI): API JSON + interface estática. Escuta só em 127.0.0.1 (ver run.py)."""
 import logging
+import re
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -54,19 +55,30 @@ def estado():
         novos = con.execute("SELECT COUNT(*) FROM processos WHERE novidade_em IS NOT NULL "
                             "AND (visto_em IS NULL OR novidade_em > visto_em)").fetchone()[0]
         ultima = db.meta_get(con, "ultima_atualizacao")
+        advogadas = db.advogadas(con)
     return {
         "nome": cfg["nome_advogado"], "oab": f"{cfg['oab_numero']}/{cfg['oab_uf']}".strip("/"),
-        "tem_chave": bool(cfg["datajud_api_key"]), "ultima_atualizacao": ultima,
+        "advogadas": advogadas, "tem_chave": bool(cfg["datajud_api_key"]), "ultima_atualizacao": ultima,
         "total": total, "novos": novos, "sync": sincronizador.status(),
     }
 
 
 @app.get("/api/processos")
-def processos(tribunal: str = "", orgao: str = "", q: str = "", de: str = "", ate: str = "", novidades: bool = False):
+def processos(tribunal: str = "", orgao: str = "", q: str = "", de: str = "", ate: str = "", novidades: bool = False,
+              advogada: int | None = None):
     with db.conexao() as con:
         lista = db.listar(con, tribunal=tribunal, orgao=orgao, q=q.strip(), de=de, ate=ate, so_novidades=novidades)
         filtros = db.opcoes_filtros(con)
-    return {"processos": lista, "filtros": filtros}
+        advogadas = db.advogadas(con)
+    # Contadores por advogada respeitam os outros filtros (o de advogada é aplicado depois)
+    contadores = {"todas": {"total": len(lista), "novos": sum(p["novo"] for p in lista)}}
+    for a in advogadas:
+        dela = [p for p in lista if a["id"] in p["advogadas"]]
+        contadores[a["id"]] = {"total": len(dela), "novos": sum(p["novo"] for p in dela)}
+    if advogada:
+        lista = [p for p in lista if advogada in p["advogadas"]]
+    filtros["advogadas"] = advogadas
+    return {"processos": lista, "filtros": filtros, "contadores": contadores}
 
 
 @app.get("/api/processos/{numero}")
@@ -86,9 +98,13 @@ def marcar_visto(numero: str):
 
 
 @app.post("/api/visto-todos")
-def marcar_todos_vistos():
+def marcar_todos_vistos(advogada: int | None = None):
     with db.conexao() as con:
-        con.execute("UPDATE processos SET visto_em=?", (db.agora(),))
+        if advogada:  # com o filtro de advogada ativo, só marca os processos dela
+            con.execute("UPDATE processos SET visto_em=? WHERE numero IN "
+                        "(SELECT numero FROM processo_advogada WHERE advogada_id=?)", (db.agora(), advogada))
+        else:
+            con.execute("UPDATE processos SET visto_em=?", (db.agora(),))
     return {"ok": True}
 
 
@@ -106,18 +122,23 @@ def remover(numero: str):
 
 class Adicionar(BaseModel):
     texto: str
+    advogadas: list[int] = []  # vazio = primeira advogada (comportamento de antes)
 
 
 @app.post("/api/processos/adicionar")
 def adicionar(dados: Adicionar):
-    """Recebe texto livre (colado, CSV ou TXT), extrai números CNJ e cadastra os válidos."""
+    """Recebe texto livre (colado, CSV ou TXT), extrai números CNJ e cadastra os válidos para as advogadas escolhidas."""
     numeros = cnj.extrair_numeros(dados.texto)
     invalidos = [cnj.formatar(n) for n in numeros if not cnj.digito_valido(n)]
     novos, existentes = [], []
     with db.conexao() as con:
+        validas = [a["id"] for a in db.advogadas(con)]
+        escolhidas = [i for i in dados.advogadas if i in validas] or validas[:1]
         for n in numeros:
             if cnj.digito_valido(n):
                 (novos if db.garantir_processo(con, n, "manual") else existentes).append(n)
+                for adv_id in escolhidas:  # se já existia, só acrescenta a advogada
+                    db.vincular(con, n, adv_id, "manual")
         for n in novos:
             db.recalcular_resumo(con, n)
     consultando = False
@@ -141,9 +162,17 @@ def status_sync():
     return sincronizador.status()
 
 
+class AdvogadaEditavel(BaseModel):
+    oab_numero: str
+    oab_uf: str
+    nome: str | None = None
+    cor: str | None = None
+
+
 class Configuracao(BaseModel):
     datajud_api_key: str | None = None
     backfill_dias: int | None = None
+    advogadas: list[AdvogadaEditavel] | None = None  # só nome e cor; a OAB identifica quem é
 
 
 @app.get("/api/config")
@@ -151,7 +180,7 @@ def ler_config():
     cfg = config.carregar()
     chave = cfg["datajud_api_key"]
     return {"tem_chave": bool(chave), "chave_final": chave[-6:] if chave else "", "backfill_dias": cfg["backfill_dias"],
-            "oab": f"{cfg['oab_numero']}/{cfg['oab_uf']}", "nome": cfg["nome_advogado"]}
+            "oab": f"{cfg['oab_numero']}/{cfg['oab_uf']}", "nome": cfg["nome_advogado"], "advogadas": cfg["advogadas"]}
 
 
 @app.post("/api/config")
@@ -161,5 +190,12 @@ def salvar_config(dados: Configuracao):
         cfg["datajud_api_key"] = config.normalizar_chave(dados.datajud_api_key)
     if dados.backfill_dias is not None:
         cfg["backfill_dias"] = max(1, min(int(dados.backfill_dias), 730))
+    for ed in dados.advogadas or []:
+        for a in cfg["advogadas"]:
+            if (a["oab_numero"], a["oab_uf"]) == (ed.oab_numero.strip(), ed.oab_uf.strip().upper()):
+                if ed.nome and ed.nome.strip():
+                    a["nome"] = ed.nome.strip()
+                if ed.cor and re.fullmatch(r"#[0-9a-fA-F]{6}", ed.cor):
+                    a["cor"] = ed.cor
     config.salvar(cfg)
     return ler_config()

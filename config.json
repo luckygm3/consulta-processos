@@ -1,7 +1,18 @@
 {
-  "oab_numero": "130678",
-  "oab_uf": "PR",
-  "nome_advogado": "Beatriz Daffara",
+  "advogadas": [
+    {
+      "nome": "Beatriz Daffara",
+      "oab_numero": "130678",
+      "oab_uf": "PR",
+      "cor": "#7c3aed"
+    },
+    {
+      "nome": "Kazuza",
+      "oab_numero": "130152",
+      "oab_uf": "PR",
+      "cor": "#0f766e"
+    }
+  ],
   "datajud_api_key": "cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw==",
   "backfill_dias": 180,
   "janela_dias": 30,

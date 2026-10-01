@@ -2,7 +2,17 @@
 
 // ---------- utilidades ----------
 const $ = (s) => document.querySelector(s);
-const estado = { processos: [], filtros: { tribunais: [], orgaos: [] }, aberto: null, poll: null, aba: "tudo", mostrouFim: false };
+const estado = {
+  processos: [], filtros: { tribunais: [], orgaos: [] }, aberto: null, poll: null, aba: "tudo", mostrouFim: false,
+  advogadas: [], contadores: {}, advogada: lerPreferencia("advogada"), // "" = todas
+};
+
+function lerPreferencia(chave) {
+  try { return localStorage.getItem(chave) || ""; } catch (_) { return ""; }
+}
+function gravarPreferencia(chave, valor) {
+  try { localStorage.setItem(chave, valor); } catch (_) { /* navegador sem armazenamento: só não lembra */ }
+}
 
 async function api(url, opcoes = {}) {
   const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opcoes });
@@ -57,7 +67,10 @@ const SEM_DADOS = "sem dados públicos (possível segredo de justiça)";
 // ---------- estado geral ----------
 async function carregarEstado() {
   const e = await api("/api/estado");
-  $("#identidade").textContent = [e.nome, e.oab && `OAB ${e.oab}`].filter(Boolean).join(" · ");
+  estado.advogadas = e.advogadas || [];
+  $("#identidade").textContent = estado.advogadas.length
+    ? estado.advogadas.map((a) => `${a.nome} · OAB ${a.oab_numero}/${a.oab_uf}`).join("   |   ")
+    : [e.nome, e.oab && `OAB ${e.oab}`].filter(Boolean).join(" · ");
   $("#ultima").textContent = e.ultima_atualizacao ? `Última atualização: ${fmtDataHora(e.ultima_atualizacao)}` : "Ainda não atualizado";
   $("#aviso-chave").hidden = e.tem_chave;
   if (e.sync.rodando) acompanharSync();
@@ -69,6 +82,7 @@ function filtrosAtuais() {
   return {
     q: $("#f-q").value.trim(), tribunal: $("#f-tribunal").value, orgao: $("#f-orgao").value,
     de: $("#f-de").value, ate: $("#f-ate").value, novidades: $("#f-novidades").checked ? "true" : "",
+    advogada: estado.advogada,
   };
 }
 
@@ -78,12 +92,53 @@ async function carregarProcessos() {
   const d = await api("/api/processos?" + params);
   estado.processos = d.processos;
   estado.filtros = d.filtros;
+  estado.advogadas = d.filtros.advogadas || [];
+  estado.contadores = d.contadores || {};
+  if (estado.advogada && !estado.advogadas.some((a) => String(a.id) === estado.advogada)) {
+    escolherAdvogada(""); // advogada lembrada não existe mais no config.json
+    return;
+  }
   preencherFiltros();
   renderTabela();
   $("#btn-limpar").hidden = !Object.values(f).some(Boolean);
 }
 
+function advogadaPorId(id) {
+  return estado.advogadas.find((a) => a.id === id);
+}
+
+function primeiroNome(a) {
+  return (a.nome || "").split(/\s+/)[0] || a.nome;
+}
+
+// Etiqueta colorida com o nome de quem atua no processo
+function etiquetaAdv(a) {
+  return `<span class="etq-adv" style="--cor:${esc(a.cor)}" title="${esc(a.nome)} · OAB ${esc(a.oab_numero)}/${esc(a.oab_uf)}">${esc(primeiroNome(a))}</span>`;
+}
+
+function escolherAdvogada(id) {
+  estado.advogada = id;
+  gravarPreferencia("advogada", id);
+  carregarProcessos();
+}
+
+function preencherAdvogadas() {
+  const caixa = $("#f-advogada");
+  caixa.hidden = estado.advogadas.length < 2;
+  if (caixa.hidden) return;
+  const conta = (k) => {
+    const c = estado.contadores[k] || { total: 0, novos: 0 };
+    return `<span class="qtd">${c.total}</span>${c.novos ? `<span class="qtd-novos" title="com novidades">${c.novos} novo${c.novos > 1 ? "s" : ""}</span>` : ""}`;
+  };
+  const botoes = [["", "Todas", null, "todas"], ...estado.advogadas.map((a) => [String(a.id), primeiroNome(a), a.cor, a.id])];
+  caixa.innerHTML = botoes.map(([id, rotulo, cor, k]) => `
+    <button type="button" data-adv="${id}" class="${estado.advogada === id ? "ativa" : ""}" aria-pressed="${estado.advogada === id}">
+      ${cor ? `<span class="bolinha" style="background:${esc(cor)}"></span>` : ""}${esc(rotulo)} ${conta(k)}
+    </button>`).join("");
+}
+
 function preencherFiltros() {
+  preencherAdvogadas();
   const selT = $("#f-tribunal"), selO = $("#f-orgao");
   const t = selT.value, o = selO.value;
   selT.innerHTML = `<option value="">Todos os tribunais</option>` +
@@ -124,6 +179,7 @@ function renderTabela() {
       <td data-rotulo="Processo">
         <div class="num"><span class="n">${esc(p.numero_fmt)}</span>${p.novo ? `<span class="selo">NOVO</span>` : ""}${p.origem === "manual" ? `<span class="selo manual">manual</span>` : ""}</div>
         <div class="partes">${esc(partesTexto(p))}</div>
+        ${estado.advogadas.length > 1 ? `<div class="etqs">${p.advogadas.map(advogadaPorId).filter(Boolean).map(etiquetaAdv).join("")}</div>` : ""}
         ${p.novo ? `<button class="link pequeno visto-btn" type="button" data-visto="${p.numero}">marcar como visto</button>` : ""}
       </td>
       <td data-rotulo="Tribunal">${esc(p.tribunal)}</td>
@@ -153,6 +209,7 @@ async function marcarVisto(numero) {
   const p = estado.processos.find((x) => x.numero === numero);
   if (p) p.novo = false;
   renderTabela();
+  carregarProcessos(); // atualiza os contadores por advogada
   if (estado.aberto === numero) abrirPainel(numero);
 }
 
@@ -220,6 +277,7 @@ function renderPainel(p) {
     ["Instâncias", instancias],
     ["Ajuizamento", fmtData(p.data_ajuizamento)],
     ["Sistema", esc(p.sistema)],
+    ["Advogada(s)", p.advogadas.map(advogadaPorId).filter(Boolean).map((a) => `${etiquetaAdv(a)} ${esc(a.nome)}`).join("<br>")],
     ["Origem", p.origem === "manual" ? "Adicionado manualmente" : "Encontrado pelas publicações do DJEN"],
     ["DataJud consultado", fmtDataHora(p.datajud_em)],
   ].filter(([, v]) => v);
@@ -388,6 +446,14 @@ function abrirAdicionar() {
   $("#add-arquivo").value = "";
   $("#add-arquivo-nome").textContent = "";
   $("#add-resultado").hidden = true;
+  // Escolha da advogada: cada uma e "ambas/todas"; começa em quem está no filtro (ou na primeira)
+  const advs = estado.advogadas;
+  $("#add-advogadas").hidden = advs.length < 2;
+  const opcoes = advs.map((a) => [String(a.id), `${etiquetaAdv(a)} ${esc(a.nome)}`]);
+  if (advs.length > 1) opcoes.push([advs.map((a) => a.id).join(","), advs.length === 2 ? "Ambas" : "Todas"]);
+  const marcada = advs.some((a) => String(a.id) === estado.advogada) ? estado.advogada : opcoes[0]?.[0];
+  $("#add-adv-opcoes").innerHTML = opcoes.map(([v, rotulo]) =>
+    `<label class="chk"><input type="radio" name="add-adv" value="${v}" ${v === marcada ? "checked" : ""}> ${rotulo}</label>`).join("");
   $("#dlg-adicionar").showModal();
   $("#add-texto").focus();
 }
@@ -407,15 +473,18 @@ async function enviarAdicionar() {
   if (!texto.trim()) { $("#add-texto").focus(); return; }
   btn.disabled = true;
   try {
-    const r = await api("/api/processos/adicionar", { method: "POST", body: JSON.stringify({ texto }) });
+    const escolha = document.querySelector('input[name="add-adv"]:checked');
+    const advogadas = escolha ? escolha.value.split(",").map(Number) : [];
+    const r = await api("/api/processos/adicionar", { method: "POST", body: JSON.stringify({ texto, advogadas }) });
+    const nomes = advogadas.map(advogadaPorId).filter(Boolean).map(primeiroNome).join(" e ");
     const partes = [];
     if (!r.encontrados) partes.push(`<div class="ruim">Nenhum número de processo (formato CNJ) foi encontrado no texto.</div>`);
-    if (r.novos.length) partes.push(`<div><strong>${r.novos.length}</strong> ${r.novos.length === 1 ? "processo adicionado" : "processos adicionados"}${r.consultando ? " — consultando o DataJud…" : ""}</div>`);
-    if (r.existentes.length) partes.push(`<div>${r.existentes.length} já ${r.existentes.length === 1 ? "estava" : "estavam"} na lista.</div>`);
+    if (r.novos.length) partes.push(`<div><strong>${r.novos.length}</strong> ${r.novos.length === 1 ? "processo adicionado" : "processos adicionados"}${nomes ? ` para ${esc(nomes)}` : ""}${r.consultando ? " — consultando o DataJud…" : ""}</div>`);
+    if (r.existentes.length) partes.push(`<div>${r.existentes.length} já ${r.existentes.length === 1 ? "estava" : "estavam"} na lista${nomes ? ` (agora vinculado${r.existentes.length > 1 ? "s" : ""} também a ${esc(nomes)})` : ""}.</div>`);
     if (r.invalidos.length) partes.push(`<div class="ruim">Número(s) com dígito verificador inválido (confira se foram digitados certo):<ul>${r.invalidos.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></div>`);
     $("#add-resultado").innerHTML = partes.join("");
     $("#add-resultado").hidden = false;
-    if (r.novos.length) {
+    if (r.novos.length || r.existentes.length) {
       $("#add-texto").value = "";
       carregarProcessos();
       if (r.consultando) acompanharSync();
@@ -431,7 +500,13 @@ async function enviarAdicionar() {
 // ---------- configurações ----------
 async function abrirConfig() {
   const c = await api("/api/config");
-  $("#cfg-ident").textContent = `${c.nome} · OAB ${c.oab} (para mudar, edite o arquivo config.json)`;
+  $("#cfg-ident").textContent = "";
+  $("#cfg-advogadas").innerHTML = (c.advogadas || []).map((a) => `
+    <div class="cfg-adv" data-oab="${esc(a.oab_numero)}" data-uf="${esc(a.oab_uf)}">
+      <input type="color" class="cfg-adv-cor" value="${esc(a.cor)}" title="Cor da etiqueta" aria-label="Cor de ${esc(a.nome)}">
+      <input type="text" class="campo cfg-adv-nome" value="${esc(a.nome)}" aria-label="Nome da advogada">
+      <span class="ajuda">OAB ${esc(a.oab_numero)}/${esc(a.oab_uf)}</span>
+    </div>`).join("");
   $("#cfg-chave").value = "";
   $("#cfg-chave-status").textContent = c.tem_chave
     ? `Chave configurada (termina em …${c.chave_final}). Cole uma nova só se quiser substituir.`
@@ -444,11 +519,16 @@ async function salvarConfig() {
   const corpo = { backfill_dias: Number($("#cfg-dias").value) || 180 };
   const chave = $("#cfg-chave").value.trim();
   if (chave) corpo.datajud_api_key = chave;
+  corpo.advogadas = [...document.querySelectorAll(".cfg-adv")].map((d) => ({
+    oab_numero: d.dataset.oab, oab_uf: d.dataset.uf,
+    nome: d.querySelector(".cfg-adv-nome").value.trim(), cor: d.querySelector(".cfg-adv-cor").value,
+  }));
   try {
     await api("/api/config", { method: "POST", body: JSON.stringify(corpo) });
     $("#dlg-config").close();
     toast(chave ? "Chave salva. Clique em “Atualizar tudo” para buscar as movimentações." : "Configurações salvas.");
     carregarEstado();
+    carregarProcessos();
   } catch (e) {
     toast("Erro ao salvar: " + e.message);
   }
@@ -464,7 +544,7 @@ function ligarEventos() {
   $("#add-arquivo").onchange = lerArquivo;
   $("#cfg-salvar").onclick = salvarConfig;
   $("#btn-vistos").onclick = async () => {
-    await api("/api/visto-todos", { method: "POST" });
+    await api("/api/visto-todos" + (estado.advogada ? `?advogada=${estado.advogada}` : ""), { method: "POST" });
     toast("Tudo marcado como visto.");
     carregarProcessos();
   };
@@ -476,7 +556,11 @@ function ligarEventos() {
   $("#btn-limpar").onclick = () => {
     ["#f-q", "#f-tribunal", "#f-orgao", "#f-de", "#f-ate"].forEach((s) => { $(s).value = ""; });
     $("#f-novidades").checked = false;
-    carregarProcessos();
+    escolherAdvogada("");
+  };
+  $("#f-advogada").onclick = (ev) => {
+    const b = ev.target.closest("[data-adv]");
+    if (b) escolherAdvogada(b.dataset.adv);
   };
 
   $("#linhas").onclick = (ev) => {

@@ -1,13 +1,17 @@
-"""Banco SQLite local: processos, publicações (DJEN), movimentos (DataJud) e metadados."""
+"""Banco SQLite local: processos, publicações (DJEN), movimentos (DataJud), advogadas e metadados."""
 import hashlib
 import json
+import logging
 import sqlite3
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime
 
-from . import cnj, texto as txt
+from . import cnj, config, texto as txt
 from .config import DB_DIR, DB_PATH
+
+log = logging.getLogger("db")
+SCHEMA_VERSAO = 2  # 2 = várias advogadas
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS processos (
@@ -79,6 +83,27 @@ CREATE TABLE IF NOT EXISTS sync_erros (
     tribunal          TEXT,
     mensagem          TEXT
 );
+CREATE TABLE IF NOT EXISTS advogadas (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    oab_numero        TEXT NOT NULL,
+    oab_uf            TEXT NOT NULL,
+    nome              TEXT,
+    cor               TEXT,
+    UNIQUE(oab_numero, oab_uf)
+);
+CREATE TABLE IF NOT EXISTS processo_advogada (     -- N:N: um processo pode ser de mais de uma advogada
+    numero            TEXT NOT NULL,
+    advogada_id       INTEGER NOT NULL,
+    origem            TEXT,                  -- 'djen', 'manual' ou 'migracao'
+    criado_em         TEXT,
+    PRIMARY KEY (numero, advogada_id)
+);
+CREATE INDEX IF NOT EXISTS ix_pa_advogada ON processo_advogada(advogada_id);
+CREATE TABLE IF NOT EXISTS comunicacao_advogada (  -- qual busca por OAB trouxe cada publicação
+    hash              TEXT NOT NULL,
+    advogada_id       INTEGER NOT NULL,
+    PRIMARY KEY (hash, advogada_id)
+);
 """
 
 
@@ -94,8 +119,61 @@ def normalizar(texto: str) -> str:
 
 def iniciar():
     DB_DIR.mkdir(exist_ok=True)
+    _backup_antes_de_migrar()
     with conexao() as con:
         con.executescript(SCHEMA)
+        _migrar(con)
+
+
+def _versao(con) -> int:
+    """Versão da estrutura do banco. Bancos de antes das advogadas não têm a chave: são v1."""
+    tem_meta = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+    if not tem_meta:
+        return SCHEMA_VERSAO  # banco recém-criado
+    return int(meta_get(con, "schema_versao", 1))
+
+
+def _backup_antes_de_migrar():
+    """Copia o banco (processos.sqlite3.bak-AAAAMMDD) antes de mudar a estrutura. Nunca sobrescreve um backup."""
+    if not DB_PATH.exists():
+        return
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        tem_processos = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='processos'").fetchone()
+        if not tem_processos or _versao(con) >= SCHEMA_VERSAO:
+            return
+        destino = DB_PATH.with_name(f"{DB_PATH.name}.bak-{datetime.now():%Y%m%d}")
+        if destino.exists():
+            destino = destino.with_name(f"{destino.name}-{datetime.now():%H%M%S}")
+        bak = sqlite3.connect(destino)
+        try:
+            con.backup(bak)  # API de backup do SQLite: cópia consistente, inclui o que ainda está no WAL
+        finally:
+            bak.close()
+        log.info("Backup do banco antes da migração: %s", destino)
+    finally:
+        con.close()
+
+
+def _migrar(con):
+    """v1 -> v2: tudo o que já existia passa a ser da primeira advogada (a OAB que estava configurada)."""
+    if _versao(con) >= SCHEMA_VERSAO:
+        return
+    lista = advogadas(con)
+    if lista:
+        dona = lista[0]
+        con.execute("""INSERT OR IGNORE INTO processo_advogada(numero, advogada_id, origem, criado_em)
+                       SELECT numero, ?, 'migracao', criado_em FROM processos""", (dona["id"],))
+        con.execute("INSERT OR IGNORE INTO comunicacao_advogada(hash, advogada_id) SELECT hash, ? FROM comunicacoes",
+                    (dona["id"],))
+        # O marco do DJEN era único; agora é por advogada (as novas começam do zero, com o backfill)
+        ultima = meta_get(con, "djen_ultima_data")
+        if ultima and not meta_get(con, chave_marco(dona)):
+            meta_set(con, chave_marco(dona), ultima)
+        qtd = con.execute("SELECT COUNT(*) FROM processo_advogada WHERE advogada_id=?", (dona["id"],)).fetchone()[0]
+        log.info("Migração do banco: %d processos vinculados a %s", qtd, dona["nome"])
+    meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
 
 
 @contextmanager
@@ -135,6 +213,32 @@ def meta_set(con, chave, valor):
                 (chave, valor))
 
 
+# --- advogadas -------------------------------------------------------------
+
+def advogadas(con) -> list[dict]:
+    """Advogadas do config.json com o id do banco (cria ou atualiza nome/cor, casando pelo número da OAB)."""
+    saida = []
+    for a in config.carregar(com_env=False)["advogadas"]:
+        con.execute("""INSERT INTO advogadas(oab_numero, oab_uf, nome, cor) VALUES(?,?,?,?)
+                       ON CONFLICT(oab_numero, oab_uf) DO UPDATE SET nome=excluded.nome, cor=excluded.cor
+                       WHERE nome IS NOT excluded.nome OR cor IS NOT excluded.cor""",
+                    (a["oab_numero"], a["oab_uf"], a["nome"], a["cor"]))
+        r = con.execute("SELECT id FROM advogadas WHERE oab_numero=? AND oab_uf=?",
+                        (a["oab_numero"], a["oab_uf"])).fetchone()
+        saida.append({**a, "id": r["id"]})
+    return saida
+
+
+def chave_marco(adv: dict) -> str:
+    """Até que data o DJEN já foi lido para esta advogada (cada uma tem o seu marco)."""
+    return f"djen_ultima_data:{adv['oab_numero']}/{adv['oab_uf']}"
+
+
+def vincular(con, numero: str, advogada_id: int, origem: str):
+    con.execute("INSERT OR IGNORE INTO processo_advogada(numero, advogada_id, origem, criado_em) VALUES(?,?,?,?)",
+                (numero, advogada_id, origem, agora()))
+
+
 # --- processos -------------------------------------------------------------
 
 def garantir_processo(con, numero: str, origem: str) -> bool:
@@ -148,7 +252,9 @@ def garantir_processo(con, numero: str, origem: str) -> bool:
 
 
 def remover_processo(con, numero: str):
-    for tabela in ("comunicacoes", "movimentos", "processos"):
+    con.execute("DELETE FROM comunicacao_advogada WHERE hash IN (SELECT hash FROM comunicacoes WHERE numero=?)",
+                (numero,))
+    for tabela in ("comunicacoes", "movimentos", "processo_advogada", "processos"):
         con.execute(f"DELETE FROM {tabela} WHERE numero=?", (numero,))
 
 
@@ -171,8 +277,8 @@ def _partes_de(destinatarios: list) -> dict:
     return partes
 
 
-def salvar_comunicacao(con, item: dict) -> bool:
-    """Grava uma comunicação do DJEN (sem duplicar). Retorna True se for nova."""
+def salvar_comunicacao(con, item: dict, advogada_id: int | None = None) -> bool:
+    """Grava uma comunicação do DJEN (sem duplicar) e a vincula a quem originou a busca. Retorna True se for nova."""
     numero = cnj.so_digitos(item.get("numero_processo") or item.get("numeroprocessocommascara") or "")
     if not numero:
         return False
@@ -181,13 +287,14 @@ def salvar_comunicacao(con, item: dict) -> bool:
     bruto = item.get("texto") or ""
     texto = txt.limpar(bruto)
     busca = normalizar(" ".join([texto, " ".join(d.get("nome", "") for d in destinatarios)]))
+    chave = _hash_comunicacao(item)
     cur = con.execute(
         """INSERT OR IGNORE INTO comunicacoes
            (hash, djen_id, numero, tribunal, orgao, tipo, tipo_documento, classe, data_disp, texto, texto_original,
             link, destinatarios, advogados, busca, capturado_em)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            _hash_comunicacao(item), item.get("id"), numero, item.get("siglaTribunal"), item.get("nomeOrgao"),
+            chave, item.get("id"), numero, item.get("siglaTribunal"), item.get("nomeOrgao"),
             item.get("tipoComunicacao"), item.get("tipoDocumento"), item.get("nomeClasse"),
             item.get("data_disponibilizacao"), texto, bruto if bruto != texto else None, item.get("link"),
             json.dumps(destinatarios, ensure_ascii=False), json.dumps(advogados, ensure_ascii=False),
@@ -196,6 +303,9 @@ def salvar_comunicacao(con, item: dict) -> bool:
     )
     nova = cur.rowcount > 0
     garantir_processo(con, numero, "djen")
+    if advogada_id is not None:
+        con.execute("INSERT OR IGNORE INTO comunicacao_advogada(hash, advogada_id) VALUES(?,?)", (chave, advogada_id))
+        vincular(con, numero, advogada_id, "djen")
     if nova:
         _mesclar_partes(con, numero, _partes_de(destinatarios))
         con.execute("UPDATE processos SET novidade_em=? WHERE numero=?", (agora(), numero))
@@ -391,11 +501,22 @@ def listar(con, tribunal="", orgao="", q="", de="", ate="", so_novidades=False) 
     if so_novidades:
         sql.append("AND novidade_em IS NOT NULL AND (visto_em IS NULL OR novidade_em > visto_em)")
     sql.append("ORDER BY ult_atividade IS NULL, ult_atividade DESC, criado_em DESC")
-    return [_processo_dict(r) for r in con.execute(" ".join(sql), args)]
+    donas = _advogadas_por_processo(con)
+    return [_processo_dict(r, donas) for r in con.execute(" ".join(sql), args)]
 
 
-def _processo_dict(r: sqlite3.Row) -> dict:
+def _advogadas_por_processo(con, numero: str | None = None) -> dict[str, list[int]]:
+    sql = "SELECT numero, advogada_id FROM processo_advogada"
+    linhas = con.execute(sql + " WHERE numero=?", (numero,)) if numero else con.execute(sql)
+    donas: dict[str, list[int]] = {}
+    for r in linhas:
+        donas.setdefault(r["numero"], []).append(r["advogada_id"])
+    return donas
+
+
+def _processo_dict(r: sqlite3.Row, donas: dict | None = None) -> dict:
     d = dict(r)
+    d["advogadas"] = sorted((donas or {}).get(d["numero"], []))
     d.pop("busca", None)
     d["numero_fmt"] = cnj.formatar(d["numero"])
     d["partes"] = json.loads(d["partes"]) if d.get("partes") else {}
@@ -409,7 +530,7 @@ def detalhe(con, numero: str) -> dict | None:
     r = con.execute("SELECT * FROM processos WHERE numero=?", (numero,)).fetchone()
     if not r:
         return None
-    p = _processo_dict(r)
+    p = _processo_dict(r, _advogadas_por_processo(con, numero))
     visto = p["visto_em"]
 
     def novo(capturado):  # só destaca eventos depois da última vez que marcou como visto

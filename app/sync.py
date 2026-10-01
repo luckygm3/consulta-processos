@@ -116,10 +116,10 @@ class Sincronizador:
 
     # --- DJEN -------------------------------------------------------------
 
-    def _janelas(self, cfg) -> list[tuple[date, date]]:
+    def _janelas(self, cfg, adv: dict) -> list[tuple[date, date]]:
         hoje = date.today()
         with db.conexao() as con:
-            ultima = db.meta_get(con, "djen_ultima_data")
+            ultima = db.meta_get(con, db.chave_marco(adv))
         if ultima:
             inicio = date.fromisoformat(ultima) - timedelta(days=SOBREPOSICAO_DIAS)
         else:
@@ -132,8 +132,10 @@ class Sincronizador:
             a = b + timedelta(days=1)
         return janelas
 
-    def _buscar_janela(self, cli: DjenClient, cfg, a: date, b: date) -> list[dict]:
-        oab, uf, nome = cfg["oab_numero"].strip(), cfg["oab_uf"].strip().upper(), cfg["nome_advogado"].strip()
+    def _buscar_janela(self, cli: DjenClient, cfg, adv: dict, a: date, b: date) -> list[dict]:
+        oab, uf, nome = adv["oab_numero"], adv["oab_uf"], adv["nome"].strip()
+        if len(nome.split()) < 2:
+            nome = ""  # nome incompleto (ex.: só o primeiro) traria publicações de homônimos
         itens = []
         if oab and uf:
             try:
@@ -148,45 +150,57 @@ class Sincronizador:
         return itens
 
     def _fase_djen(self, cfg) -> str:
-        janelas = self._janelas(cfg)
-        self._fase("Publicações (DJEN)", len(janelas))
-        lidas = novas = 0
+        """Busca por OAB de cada advogada; cada publicação/processo fica vinculado a quem o encontrou."""
+        with db.conexao() as con:
+            lista = [a for a in db.advogadas(con) if a["oab_numero"] and a["oab_uf"]]
+        plano = [(adv, self._janelas(cfg, adv)) for adv in lista]
+        self._fase("Publicações (DJEN)", sum(len(j) for _, j in plano))
+        lidas = novas = feitos = 0
         processos: set[str] = set()
-        marco, falhou = None, False
+        por_advogada = []
         with DjenClient() as cli:
-            for i, (a, b) in enumerate(janelas):
-                self._progresso(i, f"Buscando publicações de {_br(a)} a {_br(b)}")
-                try:
-                    itens = self._buscar_janela(cli, cfg, a, b)
-                except DjenErro as e:
-                    self._erro("DJEN", "", f"Período {_br(a)} a {_br(b)}: {e}")
-                    falhou = True
-                    continue
-                problemas = []
-                with db.conexao() as con:
-                    tocados = set()
-                    for it in itens:
-                        lidas += 1
-                        try:
-                            with db.savepoint(con):
-                                if db.salvar_comunicacao(con, it):
-                                    novas += 1
-                            tocados.add(cnj.so_digitos(it.get("numero_processo") or ""))
-                        except Exception as e:  # um item estranho não derruba a janela
-                            log.exception("Erro ao gravar comunicação %s", it.get("id"))
-                            problemas.append((it.get("siglaTribunal") or "", f"Publicação {it.get('id')}: {e}"))
-                    for n in filter(None, tocados):
-                        db.recalcular_resumo(con, n)
-                for trib, msg in problemas:
-                    self._erro("DJEN", trib, msg)
-                processos |= tocados
-                if not falhou:
-                    marco = b  # só avança o marco em janelas contíguas sem erro
-                self._progresso(i + 1)
-        if marco:
-            with db.conexao() as con:
-                db.meta_set(con, "djen_ultima_data", marco.isoformat())
-        return f"DJEN: {lidas} publicações lidas, {novas} novas, {len(processos - {''})} processos"
+            for adv, janelas in plano:
+                deste: set[str] = set()
+                marco, falhou = None, False
+                for a, b in janelas:
+                    self._progresso(feitos, f"{adv['nome']}: publicações de {_br(a)} a {_br(b)}")
+                    try:
+                        itens = self._buscar_janela(cli, cfg, adv, a, b)
+                    except DjenErro as e:
+                        self._erro("DJEN", adv["nome"], f"Período {_br(a)} a {_br(b)}: {e}")
+                        falhou = True
+                        feitos += 1
+                        continue
+                    problemas = []
+                    with db.conexao() as con:
+                        tocados = set()
+                        for it in itens:
+                            lidas += 1
+                            try:
+                                with db.savepoint(con):
+                                    if db.salvar_comunicacao(con, it, adv["id"]):
+                                        novas += 1
+                                tocados.add(cnj.so_digitos(it.get("numero_processo") or ""))
+                            except Exception as e:  # um item estranho não derruba a janela
+                                log.exception("Erro ao gravar comunicação %s", it.get("id"))
+                                problemas.append((it.get("siglaTribunal") or "", f"Publicação {it.get('id')}: {e}"))
+                        for n in filter(None, tocados):
+                            db.recalcular_resumo(con, n)
+                    for trib, msg in problemas:
+                        self._erro("DJEN", trib, msg)
+                    deste |= tocados
+                    if not falhou:
+                        marco = b  # só avança o marco em janelas contíguas sem erro
+                    feitos += 1
+                    self._progresso(feitos)
+                if marco:
+                    with db.conexao() as con:
+                        db.meta_set(con, db.chave_marco(adv), marco.isoformat())
+                deste.discard("")
+                processos |= deste
+                por_advogada.append(f"{adv['nome']}: {len(deste)}")
+        return (f"DJEN: {lidas} publicações lidas, {novas} novas, {len(processos)} processos"
+                + (f" ({', '.join(por_advogada)})" if len(por_advogada) > 1 else ""))
 
     # --- DataJud ----------------------------------------------------------
 
