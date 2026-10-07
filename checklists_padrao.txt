@@ -1,0 +1,35 @@
+# Checklists padrão: cada demanda nova (card do Xablau ou tarefa da agenda) nasce com uma destas listas.
+#   [processo]   -> cards "Com processo" e "Petição inicial"; tarefas da agenda (modelo padrão)
+#   [preventivo] -> cards "Preventivo / consultoria"
+# Um item por linha, na ordem em que devem aparecer. Linhas em branco e linhas começando com # são ignoradas.
+# Pode editar à vontade: vale para as próximas demandas criadas (as que já existem não mudam).
+
+[processo]
+Reunião de Briefing
+Solicitar Documentos
+Análise dos Documentos
+Elaboração dos Fatos
+Elaboração do Mérito
+Revisão da Petição Inicial
+Organizar Documentos
+Protocolo Inicial
+Audiência de Conciliação
+Análise da Defesa
+Esboço da Impugnação
+Revisão da Impugnação
+Ajustes na Impugnação
+Protocolo da Impugnação
+Envio de Carta Convite para Testemunha
+Audiência de Instrução
+Sentença (informado pelo juízo)
+
+[preventivo]
+Reunião de Briefing
+Solicitar Documentos
+Análise dos Documentos
+Pesquisa de Legislação e Jurisprudência
+Elaboração do Parecer / Minuta
+Revisão
+Envio ao Cliente
+Ajustes
+Encerramento

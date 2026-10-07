@@ -6,21 +6,24 @@ const COLUNAS = [
   ["a_fazer", "A fazer", ""],
   ["andamento", "Em andamento", ""],
   ["aguardando", "Aguardando terceiros", ""],
-  ["concluido", "Concluído", ""],
 ];
-const NOME_STATUS = Object.fromEntries(COLUNAS.map(([k, n]) => [k, n]));
-const URGENCIAS = [
-  ["vencido", "Vencidos"], ["hoje", "Vencem hoje"], ["amanha", "Próximo dia útil"],
-  ["ate5", "Até 5 dias úteis"], ["folgado", "Folgados"], ["sem_data", "Sem data"],
-];
+// Concluídas saem do quadro e ficam só na vista "Concluídos" (ícone ao lado das visões)
+const NOME_STATUS = { ...Object.fromEntries(COLUNAS.map(([k, n]) => [k, n])), concluido: "Concluído" };
 const SEMANA = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
 const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro",
   "novembro", "dezembro"];
 
 const ag = {
-  tarefas: [], visao: lerPreferencia("ag-visao") || "kanban", calModo: "mes", calRef: new Date(),
-  editando: null, checklist: [], calculo: undefined, arrastando: null, feriadosCache: {},
+  tarefas: [], cardsQuadro: [], visao: lerPreferencia("ag-visao") || "kanban", calModo: "mes", calRef: new Date(),
+  editando: null, ck: null, calculo: undefined, arrastando: null, feriadosCache: {}, vendoFeitas: false,
+  memoria: memoriaCards("cards-agenda"), modelos: {},
 };
+const TIPO_PRAZO = { processual: "Prazo processual (veio do processo)", interno: "Prazo interno (posto pela equipe)" };
+
+// Pontinho que distingue prazo processual (cheio) de interno (vazado)
+function marcaPrazo(tipo) {
+  return tipo ? `<span class="pz pz-${tipo}" title="${TIPO_PRAZO[tipo]}" aria-label="${TIPO_PRAZO[tipo]}"></span>` : "";
+}
 
 // ---------- utilidades ----------
 function dataBr(iso, comSemana = true) {
@@ -54,6 +57,8 @@ function advogadasDaTarefa(t) {
 async function carregarAgenda() {
   const d = await api("/api/agenda");
   ag.tarefas = d.tarefas;
+  ag.cardsQuadro = d.cards || [];
+  estado.pessoas = d.pessoas || estado.pessoas;
   ag.regras = d.regras;
   if (!estado.advogadas.length) await carregarEstado();
   preencherFiltrosAgenda();
@@ -62,33 +67,68 @@ async function carregarAgenda() {
 }
 
 function filtrosAgenda() {
-  return {
-    adv: $("#ag-f-adv").value, proc: $("#ag-f-proc").value.trim(), status: $("#ag-f-status").value,
-    de: $("#ag-f-de").value, ate: $("#ag-f-ate").value,
-  };
+  return { adv: $("#ag-f-adv").value, proc: $("#ag-f-proc").value.trim() };
 }
+
+// filtro "Processo (número ou parte)"
+function casaProcesso(f, x) {
+  if (!f.proc) return true;
+  const digitos = f.proc.replace(/\D/g, "");
+  return (digitos.length >= 4 && (x.numero || "").includes(digitos))
+    || (x.partes || "").toLowerCase().includes(f.proc.toLowerCase()) || (x.numero_fmt || "").includes(f.proc);
+}
+
+// filtro Beatriz/Kazuza: a demanda é dela se ela for a responsável (ou, sem responsável, atuar no processo),
+// ou se algum item da checklist estiver com ela
+const temItemDe = (lista, advId) => (lista || []).some((c) => c.resp === `a:${advId}`);
 
 function tarefasFiltradas() {
   const f = filtrosAgenda();
-  const digitos = f.proc.replace(/\D/g, "");
-  const texto = f.proc.toLowerCase();
-  return ag.tarefas.filter((t) => {
-    if (f.adv) {
-      const id = Number(f.adv);
-      if (!(t.advogada_id === id || (!t.advogada_id && t.advogadas_processo.includes(id)))) return false;
+  const id = Number(f.adv) || null;
+  return ag.tarefas.filter((t) => casaProcesso(f, t) && (!id || t.advogada_id === id
+    || (!t.advogada_id && t.advogadas_processo.includes(id)) || temItemDe(t.checklist, id)));
+}
+
+// Itens de checklist com data e prazo fatal interno dos cards do quadro: entram no Calendário e na Lista por data.
+// Fonte única: são lidos das próprias demandas (tarefas e cards); nada é copiado para a agenda.
+function entradasAgenda() {
+  const f = filtrosAgenda();
+  const id = Number(f.adv) || null;
+  const pais = [
+    ...ag.tarefas.filter((t) => t.status !== "concluido").map((t) => ({
+      dono: "tarefa", id: t.id, nome: t.titulo, numero: t.numero, numero_fmt: t.numero_fmt, partes: t.partes,
+      advs: t.advogada_id ? [t.advogada_id] : t.advogadas_processo, checklist: t.checklist, prazo: null })),
+    ...ag.cardsQuadro.map((c) => ({
+      dono: "card", id: c.id, nome: c.titulo, numero: c.numero, numero_fmt: c.numero_fmt, partes: c.partes,
+      advs: c.advogadas_processo, checklist: c.checklist, prazo: c.prazo })),
+  ];
+  const itens = [], prazos = [];
+  for (const p of pais.filter((x) => casaProcesso(f, x))) {
+    for (const c of p.checklist) {
+      // item com responsável: vale o responsável; sem responsável: vale quem é da demanda
+      if (c.data && (!id || c.resp === `a:${id}` || (!c.resp && p.advs.includes(id)))) itens.push({ ...c, pai: p });
     }
-    if (f.proc) {
-      const casaNum = digitos.length >= 4 && (t.numero || "").includes(digitos);
-      const casaTxt = (t.partes || "").toLowerCase().includes(texto) || (t.numero_fmt || "").includes(f.proc);
-      if (!casaNum && !casaTxt) return false;
+    // prazo processual de card já aparece como a própria tarefa do processo; aqui só o interno
+    if (p.prazo && p.prazo.tipo === "interno" && (!id || p.advs.includes(id) || temItemDe(p.checklist, id))) {
+      prazos.push({ ...p.prazo, pai: p });
     }
-    if (f.status === "abertos" && t.status === "concluido") return false;
-    if (f.status && f.status !== "abertos" && t.status !== f.status) return false;
-    if ((f.de || f.ate) && !t.prazo_fatal) return false;
-    if (f.de && t.prazo_fatal < f.de) return false;
-    if (f.ate && t.prazo_fatal > f.ate) return false;
-    return true;
-  });
+  }
+  return { itens, prazos };
+}
+
+async function marcarItem(dono, donoId, item, feito) {
+  try {
+    await api("/api/checklist/feito", { method: "POST", body: JSON.stringify({ dono, dono_id: donoId, item, feito }) });
+  } catch (e) {
+    toast("Erro: " + e.message);
+  }
+  carregarAgenda();
+}
+
+// clicar num item ou prazo de card abre a demanda de onde ele veio
+function abrirPai(dono, id) {
+  if (dono === "card") abrirCardPorId(id);
+  else abrirTarefa(ag.tarefas.find((t) => t.id === id));
 }
 
 function preencherFiltrosAgenda() {
@@ -102,52 +142,54 @@ function preencherFiltrosAgenda() {
 }
 
 function renderAgenda() {
-  const lista = tarefasFiltradas();
-  renderContadores(lista);
-  document.querySelectorAll("#ag-visao [data-visao]").forEach((b) => b.classList.toggle("ativa", b.dataset.visao === ag.visao));
-  $("#ag-kanban").hidden = ag.visao !== "kanban";
-  $("#ag-calendario").hidden = ag.visao !== "calendario";
-  $("#ag-lista").hidden = ag.visao !== "lista";
-  if (ag.visao === "kanban") renderKanban(lista);
-  else if (ag.visao === "calendario") renderCalendario(lista);
-  else renderLista(lista);
+  const filtradas = tarefasFiltradas();
+  const lista = filtradas.filter((t) => t.status !== "concluido");
+  const feitas = ag.vendoFeitas;
+  document.querySelectorAll("#ag-visao [data-visao]").forEach((b) => b.classList.toggle("ativa", !feitas && b.dataset.visao === ag.visao));
+  $("#ag-concluidos").classList.toggle("ativa", feitas);
+  $("#ag-concluidos").setAttribute("aria-pressed", feitas);
+  $("#ag-kanban").hidden = feitas || ag.visao !== "kanban";
+  $("#ag-calendario").hidden = feitas || ag.visao !== "calendario";
+  $("#ag-lista").hidden = feitas || ag.visao !== "lista";
+  $("#ag-feitas").hidden = !feitas;
+  $("#ag-expandir").hidden = feitas || ag.visao !== "kanban";
+  if (feitas) renderFeitas(filtradas.filter((t) => t.status === "concluido"));
+  else if (ag.visao === "kanban") renderKanban(lista);
+  else if (ag.visao === "calendario") renderCalendario(lista, entradasAgenda());
+  else renderLista(lista, entradasAgenda());
   $("#ag-limpar").hidden = !Object.values(filtrosAgenda()).some(Boolean);
 }
 
-function renderContadores(lista) {
-  const abertas = lista.filter((t) => t.status !== "concluido");
-  const cont = (u) => abertas.filter((t) => t.urgencia === u).length;
-  const chips = URGENCIAS.filter(([u]) => u !== "sem_data" || cont(u))
-    .map(([u, nome]) => `<span class="chip u-${u}"><b>${cont(u)}</b> ${nome}</span>`);
-  const sug = lista.filter((t) => t.status === "sugerido").length;
-  chips.push(`<span class="chip"><b>${sug}</b> sugeridos</span>`);
-  chips.push(`<span class="chip"><b>${lista.filter((t) => t.status === "concluido").length}</b> concluídos</span>`);
-  $("#ag-contadores").innerHTML = chips.join("");
+// ---------- cartão ----------
+function botaoConcluir() {
+  return `<button class="concluir" type="button" data-acao="concluir" title="Concluir" aria-label="Concluir">
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
 }
 
-// ---------- cartão ----------
+// Card contraído mostra só título + progresso da checklist (clique no card alterna; "Editar" ou duplo clique abre)
 function cartaoHTML(t) {
   const advs = advogadasDaTarefa(t);
-  const feitos = t.checklist.filter((c) => c.feito).length;
   const sug = t.status === "sugerido";
+  const origem = { djen: "DJEN", sigilo: "sigiloso" }[t.origem];
   return `
-    <article class="cartao u-${t.urgencia}" draggable="true" data-id="${t.id}">
+    <article class="cartao u-${t.urgencia} ${ag.memoria.contraido(t.id) ? "contraido" : ""}" draggable="true" data-id="${t.id}">
+      ${sug ? "" : botaoConcluir()}
       <div class="c-topo">
         ${sug ? `<input type="checkbox" class="c-sel" data-sel="${t.id}" aria-label="Selecionar">` : ""}
         <span class="c-urg">${rotuloUrgencia(t)}</span>
         ${t.prioridade === "alta" ? `<span class="c-tag prio">alta</span>` : ""}
         ${t.tipo === "audiencia" ? `<span class="c-tag">audiência</span>` : ""}
-        <span class="c-tag ${t.origem === "djen" ? "djen" : ""}">${t.origem === "djen" ? "DJEN" : "manual"}</span>
+        ${origem ? `<span class="c-tag ${t.origem === "djen" ? "djen" : ""}">${origem}</span>` : ""}
       </div>
-      <div class="c-titulo">${esc(t.titulo)}</div>
+      <div class="c-cab"><span class="c-titulo">${esc(t.titulo)}</span>${progressoChecklist(t.checklist)}</div>
       ${t.numero ? `<button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>
         ${t.partes ? `<div class="c-partes">${esc(t.partes)}</div>` : ""}` : ""}
-      ${t.prazo_fatal ? `<div class="c-datas">${t.tipo === "audiencia" ? "Data" : "Fatal"}: <b>${dataBr(t.prazo_fatal)}</b>${t.hora ? ` ${esc(t.hora)}` : ""}
+      ${t.prazo_fatal ? `<div class="c-datas">${t.tipo === "audiencia" ? "" : marcaPrazo(t.prazo_tipo)}${t.tipo === "audiencia" ? "Data" : "Fatal"}: <b>${dataBr(t.prazo_fatal)}</b>${t.hora ? ` ${esc(t.hora)}` : ""}
         ${t.data_interna && t.data_interna !== t.prazo_fatal ? ` · interno ${dataBr(t.data_interna, false)}` : ""}</div>` : ""}
       <div class="c-rodape">
         ${advs.map(etiquetaAdv).join("")}${!t.advogada_id && advs.length > 1 ? `<span class="c-def">definir</span>` : ""}
-        ${t.checklist.length ? `<span class="c-check">☑ ${feitos}/${t.checklist.length}</span>` : ""}
         ${t.observacoes ? `<span class="c-check" title="${esc(t.observacoes)}">✎</span>` : ""}
+        ${sug ? "" : `<button class="c-editar" type="button" data-acao="editar">Editar</button>`}
       </div>
       ${t.conferir ? `<div class="c-aviso">⚠ conferir manualmente</div>` : ""}
       ${sug ? `<div class="c-acoes">
@@ -183,6 +225,55 @@ async function moverTarefa(id, status) {
   renderAgenda();
   try {
     await api(`/api/agenda/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+    if (status === "concluido") toast("Concluída: foi para Concluídos.");
+  } catch (e) {
+    toast("Erro: " + e.message);
+  }
+  carregarAgenda();
+}
+
+// ---------- concluídos ----------
+function renderFeitas(lista) {
+  const ordenadas = [...lista].sort((a, b) => (b.concluido_em || "").localeCompare(a.concluido_em || ""));
+  $("#ag-feitas").innerHTML = `
+    <div class="feitas-cab"><h3>Concluídos <span class="qtd">${ordenadas.length}</span></h3>
+      <button class="link pequeno" type="button" data-voltar>voltar</button></div>
+    ${ordenadas.map((t) => `
+      <div class="feita" data-fid="${t.id}">
+        <div class="feita-txt">
+          <span class="li-titulo">${esc(t.titulo)}</span>
+          ${t.numero ? `<button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>` : ""}
+        </div>
+        <span class="li-adv">${advogadasDaTarefa(t).map(etiquetaAdv).join("")}</span>
+        <span class="feita-quando">${t.concluido_em ? "em " + dataBr(t.concluido_em, false) : ""}</span>
+        <span class="feita-acoes">
+          <button class="btn mini" type="button" data-restaurar>Restaurar</button>
+          <button class="btn mini perigo" type="button" data-apagar>Excluir definitivamente</button>
+        </span>
+      </div>`).join("") || `<p class="vazio">Nada concluído${Object.values(filtrosAgenda()).some(Boolean) ? " com esses filtros" : " ainda"}.</p>`}`;
+}
+
+function alternarFeitas(mostrar = !ag.vendoFeitas) {
+  ag.vendoFeitas = mostrar;
+  renderAgenda();
+}
+
+async function restaurarTarefa(id) {
+  try {
+    const t = await api(`/api/agenda/${id}/restaurar`, { method: "POST" });
+    toast(`Restaurada em “${NOME_STATUS[t.status] || t.status}”.`);
+  } catch (e) {
+    toast("Erro: " + e.message);
+  }
+  carregarAgenda();
+}
+
+async function apagarDefinitivo(id) {
+  const t = ag.tarefas.find((x) => x.id === id);
+  if (!t || !confirm(`Excluir definitivamente “${t.titulo}”?\nNão dá para desfazer.`)) return;
+  try {
+    await api(`/api/agenda/${id}`, { method: "DELETE" });
+    toast("Excluída definitivamente.");
   } catch (e) {
     toast("Erro: " + e.message);
   }
@@ -210,7 +301,33 @@ async function feriadosNoPeriodo(de, ate) {
   return ag.feriadosCache[chave];
 }
 
-async function renderCalendario(lista) {
+// Item de checklist na agenda: leve (sem cor de fundo), com caixinha de feito; clicar no texto abre a demanda
+function itemAgendaHTML(c, classe) {
+  const quem = pessoaPorChave(c.resp);
+  return `<div class="${classe} ${c.feito ? "feito" : ""}" data-dono="${c.pai.dono}" data-dono-id="${c.pai.id}" data-item="${esc(c.id)}"
+      role="button" tabindex="0" title="${esc(c.texto)} · ${esc(c.pai.nome)}${quem ? " — " + esc(quem.nome_completo) : ""}">
+    <input type="checkbox" class="ck-ag" ${c.feito ? "checked" : ""} aria-label="Feito: ${esc(c.texto)}">
+    ${classe === "lista-ck" ? `<span class="it-hora">${esc(c.hora || "")}</span>` : ""}
+    <span class="it-txt">${classe !== "lista-ck" && c.hora ? `<b>${esc(c.hora)}</b> ` : ""}${esc(c.texto)}<span class="it-pai"> · ${esc(c.pai.nome)}</span></span>
+    ${classe === "lista-ck" ? `<span class="li-adv">${quem ? etiquetaPessoa(quem) : ""}</span>` : ""}
+  </div>`;
+}
+
+// Prazo fatal interno de um card do quadro: destaque leve (contorno na cor da urgência, sem fundo)
+function prazoCardHTML(p, classe) {
+  const rotulo = `${marcaPrazo("interno")}${p.hora ? esc(p.hora) + " " : ""}${esc(p.descricao)}<span class="it-pai"> · ${esc(p.pai.nome)}</span>`;
+  if (classe === "cal") {
+    return `<button type="button" class="cal-chip cal-prazo-card u-${p.urgencia}" data-dono="card" data-dono-id="${p.pai.id}"
+      title="Prazo fatal de ${esc(p.pai.nome)}">${rotulo}</button>`;
+  }
+  return `<div class="lista-item lista-prazo-card u-${p.urgencia}" data-dono="card" data-dono-id="${p.pai.id}" role="button" tabindex="0">
+    <span></span><span class="c-urg">${rotuloUrgencia({ ...p, prazo_fatal: p.data })}</span>
+    <span class="li-titulo">${rotulo}</span><span></span><span></span>
+    <span class="li-status">${esc(typeof NOME_QUADRO === "string" ? NOME_QUADRO : "")}</span>
+  </div>`;
+}
+
+async function renderCalendario(lista, { itens, prazos }) {
   const ref = ag.calRef;
   let ini, dias;
   if (ag.calModo === "mes") {
@@ -231,54 +348,69 @@ async function renderCalendario(lista) {
   const hoje = isoLocal(new Date());
   const porDia = (campo) => lista.reduce((m, t) => (t[campo] && (m[t[campo]] ||= []).push(t), m), {});
   const fatais = porDia("prazo_fatal"), internas = porDia("data_interna");
+  const agrupar = (xs) => xs.reduce((m, x) => ((m[x.data] ||= []).push(x), m), {});
+  const itensDia = agrupar(itens), prazosDia = agrupar(prazos);
   $("#cal-grade").className = `cal-grade ${ag.calModo}`;
   $("#cal-grade").innerHTML = SEMANA.map((s) => `<div class="cal-cab">${s}</div>`).join("") + datas.map((iso) => {
     const dt = new Date(iso + "T12:00:00");
     const fora = ag.calModo === "mes" && dt.getMonth() !== ref.getMonth();
     const fer = feriados.filter((f) => f.data === iso);
     const chips = (fatais[iso] || []).map((t) =>
-      `<button type="button" class="cal-chip u-${t.urgencia}" data-id="${t.id}" title="${esc(t.titulo)} — ${esc(t.numero_fmt)}">${t.hora && !t.titulo.includes(t.hora) ? esc(t.hora) + " " : ""}${esc(t.titulo)}</button>`);
+      `<button type="button" class="cal-chip u-${t.urgencia}" data-id="${t.id}" title="${esc(t.titulo)} — ${esc(t.numero_fmt)}">${t.tipo === "audiencia" ? "" : marcaPrazo(t.prazo_tipo)}${t.hora && !t.titulo.includes(t.hora) ? esc(t.hora) + " " : ""}${esc(t.titulo)}</button>`);
     const ints = (internas[iso] || []).filter((t) => t.data_interna !== t.prazo_fatal && t.status !== "concluido").map((t) =>
       `<button type="button" class="cal-chip interno" data-id="${t.id}" title="Data interna: ${esc(t.titulo)}">↳ ${esc(t.titulo)}</button>`);
+    const pzs = (prazosDia[iso] || []).map((p) => prazoCardHTML(p, "cal"));
+    const its = (itensDia[iso] || []).sort((a, b) => (a.hora || "99").localeCompare(b.hora || "99")).map((c) => itemAgendaHTML(c, "cal-item"));
     return `<div class="cal-dia ${fora ? "fora" : ""} ${iso === hoje ? "hoje" : ""} ${fer.length || dt.getDay() % 6 === 0 ? "nao-util" : ""}" data-dia="${iso}">
       <div class="cal-num">${dt.getDate()}</div>
       ${fer.map((f) => `<div class="cal-fer" title="${esc(f.descricao)}${f.tribunais ? " — " + esc(f.tribunais) : ""}${f.comarca ? " — " + esc(f.comarca) : ""}">${esc(f.descricao)}${f.tribunais ? ` <small>(${esc(f.tribunais.length > 12 ? "alguns tribunais" : f.tribunais)})</small>` : ""}</div>`).join("")}
-      ${chips.join("")}${ints.join("")}
+      ${chips.join("")}${pzs.join("")}${ints.join("")}${its.join("")}
     </div>`;
   }).join("");
 }
 
 // ---------- lista por data ----------
-function renderLista(lista) {
+function renderLista(lista, { itens, prazos }) {
   const hoje = isoLocal(new Date());
   const grupos = new Map();
-  [...lista].sort((a, b) => (a.prazo_fatal || "9999").localeCompare(b.prazo_fatal || "9999")).forEach((t) => {
-    const k = !t.prazo_fatal ? "sem" : (t.prazo_fatal < hoje && t.status !== "concluido" ? "vencidos" : t.prazo_fatal);
-    if (!grupos.has(k)) grupos.set(k, []);
-    grupos.get(k).push(t);
-  });
+  const por = (k, html) => { if (!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(html); };
+  const chave = (data) => (!data ? "sem" : data < hoje ? "vencidos" : data);
+  [...lista].sort((a, b) => (a.prazo_fatal || "9999").localeCompare(b.prazo_fatal || "9999")).forEach((t) => por(chave(t.prazo_fatal), `
+    <div class="lista-item u-${t.urgencia}" data-id="${t.id}">
+      ${t.status === "sugerido" ? "<span></span>" : botaoConcluir()}
+      <span class="c-urg">${rotuloUrgencia(t)}</span>
+      <span class="li-titulo">${t.tipo === "audiencia" ? "" : marcaPrazo(t.prazo_tipo)}${esc(t.titulo)}${t.hora && !t.titulo.includes(t.hora) ? ` · ${esc(t.hora)}` : ""}</span>
+      ${t.numero ? `<button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>` : "<span></span>"}
+      <span class="li-adv">${advogadasDaTarefa(t).map(etiquetaAdv).join("")}</span>
+      <span class="li-status">${NOME_STATUS[t.status] || t.status}${t.conferir ? " · ⚠ conferir" : ""}</span>
+    </div>`));
+  [...prazos].sort((a, b) => a.data.localeCompare(b.data)).forEach((p) => por(chave(p.data), prazoCardHTML(p, "lista")));
+  // itens feitos saem da lista (continuam riscados no calendário e dentro da demanda)
+  itens.filter((c) => !c.feito).sort((a, b) => (a.data + (a.hora || "99")).localeCompare(b.data + (b.hora || "99")))
+    .forEach((c) => por(chave(c.data), itemAgendaHTML(c, "lista-ck")));
   const titulo = (k) => k === "sem" ? "Sem data" : k === "vencidos" ? "⚠ Vencidos" :
     `${dataBr(k)}${k === hoje ? " — hoje" : ""} <small>${k.slice(0, 4)}</small>`;
   const ordem = [...grupos.keys()].sort((a, b) => (a === "vencidos" ? -1 : b === "vencidos" ? 1 : a === "sem" ? 1 : b === "sem" ? -1 : a.localeCompare(b)));
   $("#ag-lista").innerHTML = ordem.map((k) => `
-    <section class="lista-grupo"><h3>${titulo(k)}</h3>
-      ${grupos.get(k).map((t) => `
-        <div class="lista-item u-${t.urgencia}" data-id="${t.id}">
-          <span class="c-urg">${rotuloUrgencia(t)}</span>
-          <span class="li-titulo">${esc(t.titulo)}${t.hora && !t.titulo.includes(t.hora) ? ` · ${esc(t.hora)}` : ""}</span>
-          ${t.numero ? `<button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>` : "<span></span>"}
-          <span class="li-adv">${advogadasDaTarefa(t).map(etiquetaAdv).join("")}</span>
-          <span class="li-status">${NOME_STATUS[t.status] || t.status}${t.conferir ? " · ⚠ conferir" : ""}</span>
-        </div>`).join("")}
-    </section>`).join("") || `<p class="vazio">Nenhuma tarefa com esses filtros.</p>`;
+    <section class="lista-grupo"><h3>${titulo(k)}</h3>${grupos.get(k).join("")}</section>`).join("")
+    || `<p class="vazio">Nenhuma tarefa com esses filtros.</p>`;
 }
 
 // ---------- editar / criar ----------
-function abrirTarefa(t, padrao = {}) {
+async function abrirTarefa(t, padrao = {}) {
+  if (!t) {
+    // Tarefa nova nasce com a checklist padrão (checklists_padrao.txt, lido na hora); modelo "processo" por padrão
+    ag.modelos = await api("/api/checklist-padrao").catch(() => ({}));
+    ag.modelo = "processo";
+  }
+  if (!estado.pessoas.length) await carregarPessoas();
   ag.editando = t || null;
-  const x = t || { titulo: "", tipo: "tarefa", status: "a_fazer", prioridade: "media", checklist: [], ...padrao };
-  ag.checklist = JSON.parse(JSON.stringify(x.checklist || []));
+  const x = t || { titulo: "", tipo: "tarefa", status: "a_fazer", prioridade: "media", ...padrao };
   ag.calculo = undefined; // só envia se recalcular
+  $("#t-fatal").value = x.prazo_fatal || "";
+  ag.ck.definir(t ? t.checklist : ag.modelos[ag.modelo]);
+  $("#t-modelo").hidden = !!t;
+  marcarModelo();
   $("#t-titulo-dlg").textContent = t ? (t.status === "sugerido" ? "Prazo sugerido" : "Editar") : "Nova tarefa";
   $("#t-titulo").value = x.titulo || "";
   $("#t-tipo").value = x.tipo || "tarefa";
@@ -286,7 +418,6 @@ function abrirTarefa(t, padrao = {}) {
   $("#t-numero").value = x.numero_fmt || x.numero || "";
   $("#t-adv").innerHTML = `<option value="">— as duas / a definir —</option>` +
     estado.advogadas.map((a) => `<option value="${a.id}" ${a.id === x.advogada_id ? "selected" : ""}>${esc(a.nome)}</option>`).join("");
-  $("#t-fatal").value = x.prazo_fatal || "";
   $("#t-interna").value = x.data_interna || "";
   $("#t-hora").value = x.hora || "";
   $("#t-prio").value = x.prioridade || "media";
@@ -306,8 +437,29 @@ function abrirTarefa(t, padrao = {}) {
   $("#t-excluir").hidden = !t;
   $("#t-excluir").textContent = t && t.origem === "djen" ? "Descartar" : "Excluir";
   $("#t-confirmar").hidden = !(t && t.status === "sugerido");
-  renderChecklist();
+  $("#t-concluir").hidden = !t || t.status === "sugerido";
+  rotuloTipoPrazo();
   $("#dlg-tarefa").showModal();
+}
+
+// Processual (veio do DJEN / foi calculado a partir da disponibilização) ou interno (data posta à mão)
+function rotuloTipoPrazo() {
+  const t = ag.editando;
+  const tipo = (t && t.origem === "djen") || ag.calculo || (t && t.calculo) ? "processual" : "interno";
+  $("#t-prazo-tipo").innerHTML = $("#t-fatal").value && $("#t-tipo").value !== "audiencia" ? `${marcaPrazo(tipo)}${tipo}` : "";
+}
+
+// Modelo da checklist de uma tarefa nova (processo / preventivo). Troca sem perguntar se ela ainda não mexeu.
+function marcarModelo() {
+  document.querySelectorAll("#t-modelo [data-modelo]").forEach((b) => b.classList.toggle("ativa", b.dataset.modelo === ag.modelo));
+}
+
+function trocarModelo(modelo) {
+  if (modelo === ag.modelo) return;
+  if (!ag.ck.igualA(ag.modelos[ag.modelo] || []) && !confirm("Trocar a checklist pelo outro modelo? O que você mudou nela se perde.")) return;
+  ag.modelo = modelo;
+  ag.ck.definir(ag.modelos[modelo]);
+  marcarModelo();
 }
 
 function renderMemoria(c) {
@@ -318,12 +470,6 @@ function renderMemoria(c) {
     <ol>${c.passos.map((p) => `<li>${esc(p)}</li>`).join("")}</ol>
     ${pulados ? `<div class="rotulo">Dias úteis pulados (feriados/suspensões)</div><ul>${pulados}</ul>` : ""}
     ${c.tribunal ? `<p class="ajuda">Calendário usado: ${esc(c.tribunal)}. Fins de semana não aparecem na lista.</p>` : ""}`;
-}
-
-function renderChecklist() {
-  $("#t-check").innerHTML = ag.checklist.map((c, i) => `
-    <li><label class="chk"><input type="checkbox" data-ci="${i}" ${c.feito ? "checked" : ""}> <span class="${c.feito ? "feito" : ""}">${esc(c.texto)}</span></label>
-      <button class="link pequeno perigo-txt" type="button" data-cx="${i}">remover</button></li>`).join("");
 }
 
 async function calcularNoDialogo() {
@@ -337,6 +483,8 @@ async function calcularNoDialogo() {
     $("#t-fatal").value = c.vencimento;
     $("#t-interna").value = c.interno;
     renderMemoria(ag.calculo);
+    rotuloTipoPrazo();
+    ag.ck.atualizar();
   } catch (e) {
     toast("Erro: " + e.message);
   }
@@ -347,22 +495,23 @@ function dadosDoDialogo() {
     titulo: $("#t-titulo").value.trim(), tipo: $("#t-tipo").value, status: $("#t-status").value,
     numero: $("#t-numero").value.replace(/\D/g, "") || null, advogada_id: Number($("#t-adv").value) || null,
     prazo_fatal: $("#t-fatal").value || null, data_interna: $("#t-interna").value || null, hora: $("#t-hora").value || null,
-    prioridade: $("#t-prio").value, observacoes: $("#t-obs").value.trim() || null, checklist: ag.checklist,
+    prioridade: $("#t-prio").value, observacoes: $("#t-obs").value.trim() || null, checklist: ag.ck.valor(),
   };
   if (ag.calculo) d.calculo = ag.calculo;
   return d;
 }
 
-async function salvarTarefa(confirmar = false) {
+// status: null = salvar como está; "a_fazer" = confirmar sugestão; "concluido" = salvar e mandar para Concluídos
+async function salvarTarefa(status = null) {
   const d = dadosDoDialogo();
   if (!d.titulo) { $("#t-titulo").focus(); return; }
   if (d.numero && d.numero.length !== 20) { toast("Número de processo incompleto (precisa de 20 dígitos)."); return; }
-  if (confirmar) d.status = "a_fazer";
+  if (status) d.status = status;
   try {
     if (ag.editando) await api(`/api/agenda/${ag.editando.id}`, { method: "PATCH", body: JSON.stringify(d) });
     else await api("/api/agenda", { method: "POST", body: JSON.stringify(d) });
     $("#dlg-tarefa").close();
-    toast(confirmar ? "Prazo confirmado: foi para A fazer." : "Salvo.");
+    toast({ a_fazer: "Prazo confirmado: foi para A fazer.", concluido: "Concluída: foi para Concluídos." }[status] || "Salvo.");
     carregarAgenda();
   } catch (e) {
     toast("Erro: " + e.message);
@@ -567,20 +716,59 @@ async function salvarTipos() {
 }
 
 // ---------- telas ----------
+// Telas do app e o que carregar ao abrir cada uma (quadro.js acrescenta a sua)
+const TELAS = { processos: null, agenda: () => carregarAgenda() };
+
 function mostrarTela(tela) {
+  if (!(tela in TELAS)) tela = "processos";
   estado.tela = tela;
   gravarPreferencia("tela", tela);
   document.querySelectorAll("[data-tela]").forEach((b) => b.classList.toggle("ativa", b.dataset.tela === tela));
-  $("#tela-processos").hidden = tela !== "processos";
-  $("#tela-agenda").hidden = tela !== "agenda";
-  if (tela === "agenda") carregarAgenda().catch((e) => toast("Erro: " + e.message));
+  Object.keys(TELAS).forEach((t) => { $(`#tela-${t}`).hidden = t !== tela; });
+  if (TELAS[tela]) TELAS[tela]().catch((e) => toast("Erro: " + e.message));
+}
+
+// Ícone de Concluídos: abre/fecha a vista e aceita cartões arrastados do Kanban
+function ligarConcluidos() {
+  const icone = $("#ag-concluidos");
+  icone.onclick = () => alternarFeitas();
+  icone.addEventListener("dragover", (ev) => {
+    if (ag.arrastando == null) return;
+    ev.preventDefault();
+    icone.classList.add("alvo");
+  });
+  icone.addEventListener("dragleave", () => icone.classList.remove("alvo"));
+  icone.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    icone.classList.remove("alvo");
+    const id = ag.arrastando ?? Number(ev.dataTransfer.getData("text/plain"));
+    ag.arrastando = null;
+    if (id) moverTarefa(id, "concluido");
+  });
+}
+
+// Botões pouco usados (.ics, feriados, tipos de ato): aparecem ao passar o mouse na barra (CSS) ou,
+// em tela de toque / pelo teclado, ao tocar na barra ou no "⋯". Tocar fora esconde de novo.
+function ligarExtras() {
+  const barra = $("#ag-topo"), mais = $("#ag-mais");
+  const revelar = (sim) => {
+    barra.classList.toggle("revelar", sim);
+    mais.setAttribute("aria-expanded", sim);
+  };
+  mais.onclick = (ev) => { ev.stopPropagation(); revelar(!barra.classList.contains("revelar")); };
+  let toque = false;
+  barra.addEventListener("pointerdown", (ev) => { toque = ev.pointerType !== "mouse"; });
+  barra.addEventListener("click", (ev) => {
+    if (toque && !ev.target.closest("button, input, select, a")) revelar(true);
+  });
+  document.addEventListener("pointerdown", (ev) => { if (!barra.contains(ev.target)) revelar(false); });
+  $("#ag-extras").addEventListener("click", (ev) => { if (ev.target.closest("button")) revelar(false); });
 }
 
 // ---------- eventos ----------
 function ligarAgenda() {
   document.querySelectorAll("[data-tela]").forEach((b) => { b.onclick = () => mostrarTela(b.dataset.tela); });
   $("#alerta-prazos-ver").onclick = () => {
-    $("#ag-f-status").value = "abertos";
     ag.visao = "lista";
     mostrarTela("agenda");
   };
@@ -588,13 +776,16 @@ function ligarAgenda() {
     const b = ev.target.closest("[data-visao]");
     if (!b) return;
     ag.visao = b.dataset.visao;
+    ag.vendoFeitas = false;
     gravarPreferencia("ag-visao", ag.visao);
     renderAgenda();
   };
-  ["#ag-f-adv", "#ag-f-status", "#ag-f-de", "#ag-f-ate"].forEach((s) => { $(s).onchange = renderAgenda; });
+  ligarConcluidos();
+  ligarExtras();
+  $("#ag-f-adv").onchange = renderAgenda;
   $("#ag-f-proc").oninput = renderAgenda;
   $("#ag-limpar").onclick = () => {
-    ["#ag-f-adv", "#ag-f-proc", "#ag-f-status", "#ag-f-de", "#ag-f-ate"].forEach((s) => { $(s).value = ""; });
+    ["#ag-f-adv", "#ag-f-proc"].forEach((s) => { $(s).value = ""; });
     renderAgenda();
   };
   $("#ag-nova").onclick = () => abrirTarefa(null, { advogada_id: Number($("#ag-f-adv").value) || null });
@@ -618,14 +809,41 @@ function ligarAgenda() {
       emLote(ids, lote.dataset.lote);
       return;
     }
+    if (ev.target.closest("[data-voltar]")) { alternarFeitas(false); return; }
+    const feita = ev.target.closest("[data-fid]");
+    if (feita) {
+      const id = Number(feita.dataset.fid);
+      if (ev.target.closest("[data-restaurar]")) restaurarTarefa(id);
+      else if (ev.target.closest("[data-apagar]")) apagarDefinitivo(id);
+      return;
+    }
+    // item de checklist ou prazo de card (calendário/lista): a caixinha marca feito; o resto abre a demanda
+    const entrada = ev.target.closest("[data-dono]");
+    if (entrada) {
+      const donoId = Number(entrada.dataset.donoId);
+      if (ev.target.classList.contains("ck-ag")) marcarItem(entrada.dataset.dono, donoId, entrada.dataset.item, ev.target.checked);
+      else abrirPai(entrada.dataset.dono, donoId);
+      return;
+    }
     const alvo = ev.target.closest("[data-id]");
     if (!alvo) return;
     const t = ag.tarefas.find((x) => x.id === Number(alvo.dataset.id));
     const acao = ev.target.closest("[data-acao]");
     if (acao && acao.dataset.acao === "confirmar") emLote([t.id], "confirmar");
     else if (acao && acao.dataset.acao === "descartar") emLote([t.id], "descartar");
-    else abrirTarefa(t);
+    else if (acao && acao.dataset.acao === "concluir") moverTarefa(t.id, "concluido");
+    else if (acao || !alvo.classList.contains("cartao")) abrirTarefa(t); // "Editar", item da lista, chip do calendário
+    else if (!ev.target.closest("a, button, input, label")) alternarCard(alvo, ag.memoria);
   });
+  telaAgenda.addEventListener("keydown", (ev) => {
+    const entrada = ev.target.closest("[data-dono]");
+    if (entrada && ev.key === "Enter" && !ev.target.classList.contains("ck-ag")) abrirPai(entrada.dataset.dono, Number(entrada.dataset.donoId));
+  });
+  telaAgenda.addEventListener("dblclick", (ev) => {
+    const c = ev.target.closest(".cartao");
+    if (c && !ev.target.closest("a, button, input, label")) abrirTarefa(ag.tarefas.find((x) => x.id === Number(c.dataset.id)));
+  });
+  ligarExpandir($("#ag-expandir"), ag.memoria, "#ag-kanban .cartao");
 
   // arrastar e soltar entre colunas
   const kanban = $("#ag-kanban");
@@ -637,7 +855,11 @@ function ligarAgenda() {
     ev.dataTransfer.setData("text/plain", c.dataset.id);
     c.classList.add("arrastando");
   });
-  kanban.addEventListener("dragend", (ev) => { ev.target.closest(".cartao")?.classList.remove("arrastando"); });
+  kanban.addEventListener("dragend", (ev) => {
+    ev.target.closest(".cartao")?.classList.remove("arrastando");
+    $("#ag-concluidos").classList.remove("alvo");
+    ag.arrastando = null;
+  });
   kanban.addEventListener("dragover", (ev) => {
     const col = ev.target.closest(".coluna");
     if (!col || ag.arrastando == null) return;
@@ -675,33 +897,24 @@ function ligarAgenda() {
   };
   $("#cal-grade").addEventListener("dblclick", (ev) => {
     const dia = ev.target.closest("[data-dia]");
-    if (dia && !ev.target.closest("[data-id]")) abrirTarefa(null, { prazo_fatal: dia.dataset.dia, data_interna: dia.dataset.dia });
+    if (dia && !ev.target.closest("[data-id], [data-dono]")) abrirTarefa(null, { prazo_fatal: dia.dataset.dia, data_interna: dia.dataset.dia });
   });
 
   // diálogo da tarefa
-  $("#t-salvar").onclick = () => salvarTarefa(false);
-  $("#t-confirmar").onclick = () => salvarTarefa(true);
+  $("#t-salvar").onclick = () => salvarTarefa();
+  $("#t-confirmar").onclick = () => salvarTarefa("a_fazer");
+  $("#t-concluir").onclick = () => salvarTarefa("concluido");
   $("#t-excluir").onclick = excluirTarefa;
   $("#t-calcular").onclick = calcularNoDialogo;
   $("#t-abrir-proc").onclick = () => {
     const n = $("#t-numero").value.replace(/\D/g, "");
     if (n.length === 20) { $("#dlg-tarefa").close(); abrirPainel(n); }
   };
-  const addItem = () => {
-    const v = $("#t-check-novo").value.trim();
-    if (!v) return;
-    ag.checklist.push({ texto: v, feito: false });
-    $("#t-check-novo").value = "";
-    renderChecklist();
-  };
-  $("#t-check-add").onclick = addItem;
-  $("#t-check-novo").onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); addItem(); } };
-  $("#t-check").onclick = (ev) => {
-    const ci = ev.target.closest("[data-ci]");
-    if (ci) { ag.checklist[Number(ci.dataset.ci)].feito = ci.checked; renderChecklist(); return; }
-    const cx = ev.target.closest("[data-cx]");
-    if (cx) { ag.checklist.splice(Number(cx.dataset.cx), 1); renderChecklist(); }
-  };
+  // checklist avisa etapas marcadas depois do prazo fatal da tarefa
+  ag.ck = criarChecklist($("#t-checklist"), { prazo: () => $("#t-fatal").value || null });
+  $("#t-fatal").addEventListener("input", () => { ag.ck.atualizar(); rotuloTipoPrazo(); });
+  $("#t-tipo").addEventListener("change", rotuloTipoPrazo);
+  $("#t-modelo").onclick = (ev) => { const b = ev.target.closest("[data-modelo]"); if (b) trocarModelo(b.dataset.modelo); };
 
   // feriados
   $("#fer-ano").onchange = renderFeriados;
@@ -737,8 +950,8 @@ function ligarAgenda() {
   };
 
   carregarAlertas();
-  const inicial = location.hash === "#agenda" ? "agenda" : (lerPreferencia("tela") || "processos");
-  mostrarTela(inicial);
+  // depois de todos os scripts (quadro.js registra a tela dele em TELAS)
+  document.addEventListener("DOMContentLoaded", () => mostrarTela(location.hash.slice(1) || lerPreferencia("tela") || "processos"));
 }
 
 ligarAgenda();

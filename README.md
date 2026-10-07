@@ -67,11 +67,40 @@ O DJEN (publicações) não precisa de chave.
 
 > **Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal.**
 
-- Três visões: **Kanban** (Sugeridos → A fazer → Em andamento → Aguardando terceiros → Concluído; arraste os cartões),
-  **Calendário** (mês/semana, com feriados) e **Lista por data**. Filtros por advogada, processo, status e período.
+- Três visões: **Kanban** (Sugeridos → A fazer → Em andamento → Aguardando terceiros; arraste os cartões),
+  **Calendário** (mês/semana, com feriados) e **Lista por data**. Filtros por advogada e por processo.
+- **Concluídos**: o ícone ao lado das visões. Conclua pelo círculo do cartão (aparece ao passar o mouse), pela lista,
+  pelo botão **✓ Concluir** da tarefa, ou arrastando o cartão até o ícone. Lá dentro: **Restaurar** (volta para a
+  coluna de onde saiu) ou **Excluir definitivamente**.
+- **Contrair todos / Expandir todos** (Kanban): card contraído mostra só o título e o progresso da checklist. Clicar
+  num card contrai/expande só ele; para abrir a tarefa, use **Editar** (aparece ao passar o mouse) ou dois cliques.
+  O app lembra o estado.
+- **Exportar .ics**, **Feriados** e **Tipos de ato** ficam escondidos: aparecem ao passar o mouse na barra da agenda
+  (ou ao tocar no **⋯**).
 - Cores por urgência: vermelho = vencido; laranja = vence hoje/próximo dia útil; amarelo = até 5 dias úteis; verde = folgado.
 - **+ Nova tarefa**: qualquer tarefa, com ou sem processo, com checklist, prioridade e observações. No painel de um
   processo há o atalho **+ Tarefa / prazo**. O quadro “Calcular prazo” calcula o fatal a partir da disponibilização.
+- **Checklist (estilo Trello)**, nas tarefas e nos cards do quadro de clientes. Cada item tem texto, feito/não feito
+  e, opcionais, **data**, **horário** (só com data) e **responsável** — clique no ícone do item (ou nas etiquetas dele)
+  para abrir esses campos. Arraste pela alça para reordenar; edite, exclua e adicione itens. Progresso discreto (“3/17”).
+  - **Responsáveis**: as advogadas e as pessoas da **Equipe** (⚙ Configurações → Equipe; vale na hora).
+  - **Na agenda**: todo item com data aparece no **Calendário** e na **Lista por data**, no dia/horário dele, como
+    “Elaboração do Mérito · Fulano” (nome da demanda), mais leve que os prazos. A caixinha marca como feito — é o mesmo
+    item do card/tarefa (nada é copiado), então vale nos dois lugares. Clicar no texto abre a demanda. Itens sem data
+    ficam só dentro dela; itens feitos saem da lista (no calendário ficam riscados). O Kanban não mostra itens.
+  - **Filtro Beatriz/Kazuza**: considera também o responsável do item (item dela aparece no filtro dela; a demanda
+    também aparece se tiver algum item com ela).
+- **Checklists padrão** (`checklists_padrao.txt`, um arquivo só): seção `[processo]` (as 17 etapas do contencioso) e
+  `[preventivo]` (consultoria). No quadro, o tipo do card escolhe a lista (petição inicial usa a de processo); numa
+  tarefa nova da agenda, “Modelo da checklist” escolhe (padrão: processo). Edite o arquivo para trocar as listas;
+  vale para as próximas demandas. Sugestões do DJEN e verificações semanais não recebem checklist.
+- **Prazo fatal: processual × interno.** Pontinho **cheio** = processual (veio do processo: publicação do DJEN,
+  “Verificar prazos” ou “Calcular prazo”); pontinho **vazado** = interno (data posta à mão). Se algum item tiver data
+  depois do prazo fatal da demanda, aparece um aviso discreto (não bloqueia).
+- **Processos sigilosos**: toda segunda-feira, cada processo que o DataJud não detalha ganha a tarefa
+  “Verificar processo sigiloso nº …” em A fazer (sem duplicar: concluída ou excluída, só volta na segunda seguinte; se a
+  da semana anterior ainda estiver aberta, não cria outra). Critério: o DataJud respondeu por completo e não trouxe o
+  processo (“sem dados públicos”), ou trouxe com nível de sigilo maior que zero. Não entram no alerta de prazos.
 - **Verificar prazos** (sem IA): lê as publicações do DJEN ainda não analisadas, procura expressões como “prazo de
   quinze (15) dias”, “em 48 horas”, “5 dias úteis”, “manifeste-se”, “contestar”, “intime-se para”, reconhece o ato
   (contestação, apelação, embargos de declaração…) e cria cartões em **Sugeridos** com o trecho original, o link da
@@ -85,6 +114,23 @@ O DJEN (publicações) não precisa de chave.
 - **Exportar .ics**: gera um arquivo para importar no Google Agenda (Configurações → Importar e exportar). Exporta todas
   ou só as filtradas; sugestões não confirmadas ficam de fora.
 - Ao abrir o app, uma faixa avisa quantos prazos vencem hoje/amanhã e quantos estão vencidos.
+
+## Quadro de clientes (aba “Xablau”)
+
+O nome da aba é provisório: troque a constante `NOME_QUADRO` no começo de `static/quadro.js`.
+
+- Kanban de clientes com o mesmo visual da agenda: **5 colunas** que nascem sem nome. Clique em “Nomear coluna” para
+  dar o nome (ex.: Trabalhista, Pro bono); clique de novo para renomear. Enter salva, Esc desiste.
+- **+ Adicionar cliente** no pé de cada coluna. O card nasce com a checklist padrão do tipo e tem um **tipo**: *Com processo*
+  (escolha entre os processos cadastrados, pelo número ou pelo nome da parte, ou digite um número CNJ), *Petição
+  inicial* ou *Preventivo / consultoria* (sem processo). Quando virar processo, abra o card, mude o tipo e vincule.
+- **Prazo fatal do card**: com processo, é o **processual** — vem sozinho da agenda (o próximo prazo em aberto daquele
+  processo; sem prazo futuro, o vencido mais recente ainda aberto). Sem processo (petição inicial, preventivo), é um
+  **interno** que você digita no card (o quê, data e, se quiser, horário); ele aparece na agenda com destaque leve e
+  entra no aviso de prazos ao abrir o app.
+- Arraste os cards entre colunas ou dentro da mesma coluna (uma linha azul mostra onde vão cair).
+- Expandido, o card mostra o processo (clique para abrir), as partes e o próximo item da checklist; contraído, só o
+  nome e o progresso. Mesmo botão **Contrair todos / Expandir todos** da agenda.
 
 ### Regras do cálculo (`app/prazos.py`)
 
@@ -138,11 +184,14 @@ Testes do cálculo e da detecção: `.venv\Scripts\python -m unittest discover -
 
 ```
 app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, texto.py, main.py;
-            agenda: prazos.py (calendário e cálculo), extrair.py (regex), agenda.py, rotas_agenda.py
-static/     interface (HTML/CSS/JS puro; agenda.js = aba Agenda)
-tests/      testes do cálculo de prazos e da detecção no texto
+            agenda: prazos.py (calendário e cálculo), extrair.py (regex), agenda.py, rotas_agenda.py;
+            quadro de clientes: quadro.py, rotas_quadro.py; checklist.py (itens, "feito" e equipe)
+static/     interface (HTML/CSS/JS puro; agenda.js = aba Agenda; quadro.js = quadro de clientes;
+            checklist.js = editor de checklist reutilizável)
+tests/      testes do cálculo de prazos, da detecção no texto, da agenda e do quadro
 db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git.
             Antes de mudar a estrutura do banco, o app guarda uma cópia (processos.sqlite3.bak-AAAAMMDD)
 logs/       app.log (erros de rede e dos tribunais)
 config.json configuração editável
+checklists_padrao.txt  checklists padrão por modelo: [processo] e [preventivo] (um item por linha)
 ```

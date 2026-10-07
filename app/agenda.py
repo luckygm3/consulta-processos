@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import date, timedelta
 
-from . import cnj, config, db, extrair, prazos
+from . import checklist, cnj, config, db, extrair, prazos
 
 log = logging.getLogger("agenda")
 
@@ -51,23 +51,27 @@ def calcular_para(con, numero: str | None, disponibilizacao: str, dias: int, con
 
 # --- tarefas ----------------------------------------------------------------
 
+def tipo_prazo(origem: str | None, calculo) -> str:
+    """Processual = veio do processo (publicação do DJEN, "Verificar prazos" ou "Calcular prazo" a partir da
+    disponibilização); interno = data posta à mão pela equipe."""
+    return "processual" if origem == "djen" or calculo else "interno"
+
+
 def _tarefa_dict(r, cals: Calendarios, hoje: date) -> dict:
     d = dict(r)
-    for campo, vazio in (("checklist", []), ("calculo", None)):
-        try:
-            d[campo] = json.loads(d[campo]) if d.get(campo) else vazio
-        except ValueError:
-            d[campo] = vazio
+    d["checklist"] = checklist.ler(d.get("checklist"))
+    try:
+        d["calculo"] = json.loads(d["calculo"]) if d.get("calculo") else None
+    except ValueError:
+        d["calculo"] = None
+    d["prazo_tipo"] = tipo_prazo(d.get("origem"), d["calculo"]) if d.get("prazo_fatal") else None
     d["numero_fmt"] = cnj.formatar(d["numero"]) if d.get("numero") else ""
     cal = cals.de(d.get("p_tribunal") or (cnj.tribunal(d["numero"])[0] if d.get("numero") else ""), d.get("p_orgao"))
     if d["status"] == "concluido":
         d["urgencia"], d["dias_restantes"] = "concluido", None
     else:
         d["urgencia"], d["dias_restantes"] = prazos.urgencia(d.get("prazo_fatal"), cal, hoje)
-    partes = json.loads(d.pop("p_partes") or "{}") if d.get("p_partes") else {}
-    nome = lambda xs: (xs[0] + (" e outros" if len(xs) > 1 else "")) if xs else ""  # noqa: E731
-    a, b = nome(partes.get("ativo") or []), nome(partes.get("passivo") or [])
-    d["partes"] = f"{a} × {b}" if a and b else (a or b)
+    d["partes"] = db.resumo_partes(d.pop("p_partes", None))
     d["tribunal"] = d.pop("p_tribunal", None)
     d.pop("p_orgao", None)
     d["advogadas_processo"] = [int(x) for x in (d.pop("p_advs") or "").split(",") if x]
@@ -94,9 +98,11 @@ def obter(con, tid: int) -> dict | None:
 
 def _valores(dados: dict) -> dict:
     v = {k: dados[k] for k in CAMPOS if k in dados}
-    for k in ("checklist", "calculo"):
-        if k in v and not isinstance(v[k], str) and v[k] is not None:
-            v[k] = json.dumps(v[k], ensure_ascii=False)
+    if "checklist" in v:
+        lista = json.loads(v["checklist"]) if isinstance(v["checklist"], str) else v["checklist"]
+        v["checklist"] = json.dumps(checklist.normalizar(lista), ensure_ascii=False)
+    if "calculo" in v and not isinstance(v["calculo"], str) and v["calculo"] is not None:
+        v["calculo"] = json.dumps(v["calculo"], ensure_ascii=False)
     if "numero" in v:
         v["numero"] = cnj.so_digitos(v["numero"] or "") or None
     if v.get("status") and v["status"] not in STATUS + ["descartado"]:
@@ -127,10 +133,21 @@ def atualizar(con, tid: int, dados: dict):
     if not v:
         return
     v["atualizado_em"] = db.agora()
-    if "status" in v:
-        v["concluido_em"] = db.agora() if v["status"] == "concluido" else None
+    atual = con.execute("SELECT status FROM tarefas WHERE id=?", (tid,)).fetchone()
+    if "status" in v and atual and v["status"] != atual["status"]:
+        concluindo = v["status"] == "concluido"
+        v["concluido_em"] = db.agora() if concluindo else None
+        v["status_anterior"] = atual["status"] if concluindo else None
     sets = ",".join(f"{k}=?" for k in v)
     con.execute(f"UPDATE tarefas SET {sets} WHERE id=?", [*v.values(), tid])
+
+
+def restaurar(con, tid: int) -> bool:
+    """Tira de Concluídos e devolve à coluna em que estava (ou 'A fazer')."""
+    cur = con.execute("""UPDATE tarefas SET status=COALESCE(NULLIF(status_anterior, 'concluido'), 'a_fazer'),
+                         status_anterior=NULL, concluido_em=NULL, atualizado_em=? WHERE id=? AND status='concluido'""",
+                      (db.agora(), tid))
+    return cur.rowcount > 0
 
 
 def lote(con, ids: list[int], acao: str) -> int:
@@ -146,11 +163,61 @@ def lote(con, ids: list[int], acao: str) -> int:
     return cur.rowcount
 
 
+# --- processos sigilosos: tarefa semanal de verificação manual ------------------
+
+def sigilosos(con) -> list[str]:
+    """Processos que o DataJud não detalha. Critério, com o que a API já devolve:
+    - consulta completa (todos os shards responderam) sem nenhum resultado para um processo que sabemos que existe
+      (veio do DJEN ou foi cadastrado à mão) -> datajud_status = 'sem_dados'. A API pública omite processos sob
+      sigilo; também cai aqui processo muito recente que o tribunal ainda não enviou ao DataJud;
+    - ou o DataJud devolveu o processo com nivelSigilo > 0 em algum grau.
+    Ficam de fora tribunais fora do DataJud ('sem_alias') e consultas que falharam ('erro')."""
+    saida = []
+    for r in con.execute("SELECT numero, datajud_status, instancias FROM processos WHERE datajud_status IN ('sem_dados', 'ok')"):
+        if r["datajud_status"] == "sem_dados" or any(_nivel(i.get("sigilo")) > 0 for i in json.loads(r["instancias"] or "[]")):
+            saida.append(r["numero"])
+    return saida
+
+
+def _nivel(valor) -> int:
+    try:
+        return int(valor or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def gerar_semanais(con, hoje: date | None = None) -> int:
+    """Uma tarefa por processo sigiloso por semana (a partir da segunda-feira). Não duplica: cada semana fica
+    registrada em tarefas_geradas, então concluir ou excluir só faz reaparecer na segunda seguinte; e se a da
+    semana anterior ainda está aberta, não cria outra."""
+    hoje = hoje or date.today()
+    segunda = hoje - timedelta(days=hoje.weekday())
+    criadas = 0
+    for numero in sigilosos(con):
+        cur = con.execute("INSERT OR IGNORE INTO tarefas_geradas(chave, criado_em) VALUES(?,?)",
+                          (f"sigilo:{numero}:{segunda.isoformat()}", db.agora()))
+        if not cur.rowcount:
+            continue  # esta semana já foi gerada
+        if con.execute("SELECT 1 FROM tarefas WHERE origem='sigilo' AND numero=? AND status NOT IN ('concluido', 'descartado')",
+                       (numero,)).fetchone():
+            continue
+        advs = [r[0] for r in con.execute("SELECT advogada_id FROM processo_advogada WHERE numero=?", (numero,))]
+        criar(con, {"titulo": f"Verificar processo sigiloso nº {cnj.formatar(numero)}", "tipo": "tarefa",
+                    "status": "a_fazer", "numero": numero, "advogada_id": advs[0] if len(advs) == 1 else None,
+                    "prazo_fatal": max(segunda, hoje).isoformat(), "prioridade": "media", "origem": "sigilo",
+                    "observacoes": "O DataJud não mostra este processo (segredo de justiça ou sigilo). "
+                                   "Conferir as movimentações direto no sistema do tribunal."})
+        criadas += 1
+    if criadas:
+        log.info("Tarefas semanais de processos sigilosos criadas: %d", criadas)
+    return criadas
+
+
 def alertas(con) -> dict:
     hoje = date.today()
     cont = {"vencidos": 0, "hoje": 0, "amanha": 0, "sugeridos": 0}
     for t in listar(con, hoje):
-        if t["status"] == "concluido":
+        if t["status"] == "concluido" or t["origem"] == "sigilo":  # verificação semanal não é prazo: fica fora do alerta
             continue
         if t["status"] == "sugerido":
             cont["sugeridos"] += 1

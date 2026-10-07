@@ -12,6 +12,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.json"
+CHECKLIST_PATH = BASE_DIR / "checklists_padrao.txt"
+MODELOS_CHECKLIST = ("processo", "preventivo")
 ENV_PATH = BASE_DIR / ".env"
 DB_DIR = BASE_DIR / "db"
 DB_PATH = DB_DIR / "processos.sqlite3"
@@ -109,6 +111,30 @@ def salvar(cfg: dict) -> None:
     dados = {k: cfg.get(k, v) for k, v in DEFAULTS.items()}
     dados["advogadas"] = _advogadas(cfg)
     CONFIG_PATH.write_text(json.dumps(dados, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def checklists_padrao() -> dict[str, list[str]]:
+    """Checklists com que as demandas novas nascem, por modelo (checklists_padrao.txt: seções [processo] e
+    [preventivo], um item por linha, # = comentário). Lido a cada uso: editar o arquivo vale na hora."""
+    modelos = {m: [] for m in MODELOS_CHECKLIST}
+    try:
+        linhas = CHECKLIST_PATH.read_text(encoding="utf-8-sig").splitlines()  # -sig: aceita o BOM do Bloco de Notas
+    except OSError:
+        return modelos
+    atual = "processo"  # itens antes de qualquer seção valem para processo
+    for linha in (x.strip() for x in linhas):
+        if not linha or linha.startswith("#"):
+            continue
+        if linha.startswith("[") and linha.endswith("]"):
+            atual = linha[1:-1].strip().lower()
+            modelos.setdefault(atual, [])
+        else:
+            modelos[atual].append(linha)
+    return modelos
+
+
+def checklist_padrao(modelo: str = "processo") -> list[str]:
+    return checklists_padrao().get(modelo) or []
 
 
 def configurar_log() -> None:

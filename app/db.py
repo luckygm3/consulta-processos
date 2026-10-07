@@ -11,7 +11,7 @@ from . import cnj, config, texto as txt
 from .config import DB_DIR, DB_PATH
 
 log = logging.getLogger("db")
-SCHEMA_VERSAO = 3  # 2 = várias advogadas; 3 = agenda/prazos
+SCHEMA_VERSAO = 5  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS processos (
@@ -139,8 +139,8 @@ CREATE TABLE IF NOT EXISTS tarefas (             -- cartões da agenda/kanban
     hora              TEXT,                  -- audiências
     prioridade        TEXT DEFAULT 'media',  -- alta | media | baixa
     observacoes       TEXT,
-    checklist         TEXT,                  -- JSON [{"texto", "feito"}]
-    origem            TEXT DEFAULT 'manual', -- manual | djen
+    checklist         TEXT,                  -- JSON [{"id", "texto", "feito", "data", "hora", "resp"}] (ver checklist.py)
+    origem            TEXT DEFAULT 'manual', -- manual | djen | sigilo
     comunicacao_hash  TEXT,
     trecho            TEXT,                  -- trecho da publicação que gerou a sugestão
     calculo           TEXT,                  -- JSON: memória de cálculo
@@ -148,9 +148,40 @@ CREATE TABLE IF NOT EXISTS tarefas (             -- cartões da agenda/kanban
     aviso             TEXT,
     criado_em         TEXT,
     atualizado_em     TEXT,
-    concluido_em      TEXT
+    concluido_em      TEXT,
+    status_anterior   TEXT                   -- coluna de onde saiu ao ser concluída (para restaurar)
 );
 CREATE INDEX IF NOT EXISTS ix_tarefas_status ON tarefas(status, prazo_fatal);
+CREATE TABLE IF NOT EXISTS tarefas_geradas (     -- tarefas automáticas já criadas: não recria, mesmo se excluída
+    chave             TEXT PRIMARY KEY,      -- ex.: sigilo:<numero>:<segunda-feira da semana>
+    criado_em         TEXT
+);
+CREATE TABLE IF NOT EXISTS quadro_colunas (      -- quadro de clientes: 5 colunas fixas, nomeadas por ela na tela
+    id                INTEGER PRIMARY KEY,
+    posicao           INTEGER NOT NULL,
+    nome              TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS quadro_cards (        -- cards de cliente do quadro
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    coluna_id         INTEGER NOT NULL,
+    posicao           INTEGER NOT NULL DEFAULT 0,
+    titulo            TEXT NOT NULL,
+    tipo              TEXT NOT NULL DEFAULT 'processo', -- processo | inicial (petição inicial) | preventivo (consultoria)
+    numero            TEXT,                  -- processo vinculado (só quando tipo = processo)
+    checklist         TEXT,                  -- JSON [{"id", "texto", "feito", "data", "hora", "resp"}]
+    criado_em         TEXT,
+    atualizado_em     TEXT,
+    prazo_descricao   TEXT,                  -- prazo fatal interno (cards sem processo); o processual vem da agenda
+    prazo_data        TEXT,
+    prazo_hora        TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_quadro_cards ON quadro_cards(coluna_id, posicao);
+CREATE TABLE IF NOT EXISTS pessoas (             -- responsáveis nos itens da checklist, além das advogadas
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome              TEXT NOT NULL,
+    ativo             INTEGER DEFAULT 1,     -- 0 = removida da lista (itens antigos ainda mostram o nome)
+    criado_em         TEXT
+);
 CREATE TABLE IF NOT EXISTS comunicacao_analise ( -- publicações já varridas por "Verificar prazos" (não duplica)
     hash              TEXT PRIMARY KEY,
     analisado_em      TEXT,
@@ -223,9 +254,33 @@ def _migrar(con):
             con.executemany("INSERT INTO tipos_ato(ordem, nome, palavras, dias, contagem, justica) VALUES(?,?,?,?,?,?)",
                             [(i, *t) for i, t in enumerate(TIPOS_PADRAO, start=1)])
         log.info("Migração do banco: agenda e prazos")
+    if versao < 4:
+        # v3 -> v4: concluídas guardam a coluna de origem, para "Restaurar" devolver ao mesmo lugar
+        if "status_anterior" not in [r["name"] for r in con.execute("PRAGMA table_info(tarefas)")]:
+            con.execute("ALTER TABLE tarefas ADD COLUMN status_anterior TEXT")
+        log.info("Migração do banco: concluídos com restaurar")
+    if versao < 5:
+        # v4 -> v5: itens da checklist ganham id (a agenda marca "feito" pelo id), data, hora e responsável;
+        # cards do quadro ganham prazo fatal interno
+        colunas = [r["name"] for r in con.execute("PRAGMA table_info(quadro_cards)")]
+        for col in ("prazo_descricao", "prazo_data", "prazo_hora"):
+            if col not in colunas:
+                con.execute(f"ALTER TABLE quadro_cards ADD COLUMN {col} TEXT")
+        from .checklist import ler
+        for tabela in ("tarefas", "quadro_cards"):
+            for r in list(con.execute(f"SELECT id, checklist FROM {tabela} WHERE checklist IS NOT NULL AND checklist != ''")):
+                con.execute(f"UPDATE {tabela} SET checklist=? WHERE id=?",
+                            (json.dumps(ler(r["checklist"]), ensure_ascii=False), r["id"]))
+        log.info("Migração do banco: checklist com datas e responsáveis")
     if versao < SCHEMA_VERSAO:
         meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
     semear_feriados(con)
+    semear_quadro(con)
+
+
+def semear_quadro(con):
+    """Quadro de clientes: 5 colunas que nascem sem nome (ela nomeia na tela). Não mexe nas que já existem."""
+    con.executemany("INSERT OR IGNORE INTO quadro_colunas(id, posicao, nome) VALUES(?, ?, '')", [(i, i) for i in range(1, 6)])
 
 
 def semear_feriados(con, hoje: date | None = None):
@@ -397,6 +452,14 @@ def salvar_comunicacao(con, item: dict, advogada_id: int | None = None) -> bool:
     return nova
 
 
+def resumo_partes(partes_json: str | None) -> str:
+    """'Fulano e outros × Beltrano' a partir do JSON de partes do processo (vazio se não houver)."""
+    partes = json.loads(partes_json) if partes_json else {}
+    nome = lambda xs: (xs[0] + (" e outros" if len(xs) > 1 else "")) if xs else ""  # noqa: E731
+    a, b = nome(partes.get("ativo") or []), nome(partes.get("passivo") or [])
+    return f"{a} × {b}" if a and b else (a or b)
+
+
 def _mesclar_partes(con, numero, novas: dict):
     row = con.execute("SELECT partes FROM processos WHERE numero=?", (numero,)).fetchone()
     atuais = json.loads(row["partes"]) if row and row["partes"] else {"ativo": [], "passivo": [], "outros": []}
@@ -560,15 +623,12 @@ def recalcular_resumo(con, numero: str):
 
 # --- consultas para a interface --------------------------------------------
 
-def listar(con, tribunal="", orgao="", q="", de="", ate="", so_novidades=False) -> list[dict]:
+def listar(con, tribunal="", q="", so_novidades=False) -> list[dict]:
     sql = ["SELECT * FROM processos WHERE 1=1"]
     args: list = []
     if tribunal:
         sql.append("AND tribunal=?")
         args.append(tribunal)
-    if orgao:
-        sql.append("AND orgao=?")
-        args.append(orgao)
     if q:
         termo = normalizar(q).strip()
         digitos = cnj.so_digitos(q)
@@ -578,11 +638,6 @@ def listar(con, tribunal="", orgao="", q="", de="", ate="", so_novidades=False) 
             cond.append("numero LIKE ?")
             args.append(f"%{digitos}%")
         sql.append("AND (" + " OR ".join(cond) + ")")
-    if de or ate:
-        de_, ate_ = de or "0000-00-00", (ate or "9999-12-31") + "T99"
-        sql.append("""AND (numero IN (SELECT numero FROM comunicacoes WHERE data_disp BETWEEN ? AND ?)
-                      OR numero IN (SELECT numero FROM movimentos WHERE data_hora BETWEEN ? AND ?))""")
-        args += [de_, ate_, de_, ate_]
     if so_novidades:
         sql.append("AND novidade_em IS NOT NULL AND (visto_em IS NULL OR novidade_em > visto_em)")
     sql.append("ORDER BY ult_atividade IS NULL, ult_atividade DESC, criado_em DESC")
@@ -641,6 +696,4 @@ def detalhe(con, numero: str) -> dict | None:
 
 def opcoes_filtros(con) -> dict:
     tribunais = [r[0] for r in con.execute("SELECT DISTINCT tribunal FROM processos WHERE tribunal IS NOT NULL ORDER BY tribunal")]
-    orgaos = [{"tribunal": r[0], "orgao": r[1]} for r in con.execute(
-        "SELECT DISTINCT tribunal, orgao FROM processos WHERE orgao IS NOT NULL ORDER BY orgao COLLATE NOCASE")]
-    return {"tribunais": tribunais, "orgaos": orgaos}
+    return {"tribunais": tribunais}

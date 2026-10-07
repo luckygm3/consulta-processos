@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import cnj, config, db, rotas_agenda
+from . import cnj, config, db, rotas_agenda, rotas_quadro
 from .config import STATIC_DIR
 from .sync import sincronizador
 
@@ -18,6 +18,7 @@ log = logging.getLogger("app")
 app = FastAPI(title="Processos", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(rotas_agenda.rotas)
+app.include_router(rotas_quadro.rotas)
 
 SEM_CACHE = {"Cache-Control": "no-cache"}
 
@@ -65,10 +66,9 @@ def estado():
 
 
 @app.get("/api/processos")
-def processos(tribunal: str = "", orgao: str = "", q: str = "", de: str = "", ate: str = "", novidades: bool = False,
-              advogada: int | None = None):
+def processos(tribunal: str = "", q: str = "", novidades: bool = False, advogada: int | None = None):
     with db.conexao() as con:
-        lista = db.listar(con, tribunal=tribunal, orgao=orgao, q=q.strip(), de=de, ate=ate, so_novidades=novidades)
+        lista = db.listar(con, tribunal=tribunal, q=q.strip(), so_novidades=novidades)
         filtros = db.opcoes_filtros(con)
         advogadas = db.advogadas(con)
     # Contadores por advogada respeitam os outros filtros (o de advogada é aplicado depois)

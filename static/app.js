@@ -3,15 +3,57 @@
 // ---------- utilidades ----------
 const $ = (s) => document.querySelector(s);
 const estado = {
-  processos: [], filtros: { tribunais: [], orgaos: [] }, aberto: null, poll: null, aba: "tudo", mostrouFim: false,
+  processos: [], filtros: { tribunais: [] }, aberto: null, poll: null, aba: "tudo", mostrouFim: false,
   advogadas: [], contadores: {}, advogada: lerPreferencia("advogada"), // "" = todas
+  pessoas: [], // responsáveis nos itens de checklist: advogadas ("a:<id>") + equipe ("p:<id>")
 };
+
+function pessoaPorChave(chave) {
+  return chave ? estado.pessoas.find((p) => p.chave === chave) : null;
+}
+
+async function carregarPessoas() {
+  try { estado.pessoas = await api("/api/pessoas"); } catch (_) { /* sem a lista, os itens só não mostram o nome */ }
+}
 
 function lerPreferencia(chave) {
   try { return localStorage.getItem(chave) || ""; } catch (_) { return ""; }
 }
 function gravarPreferencia(chave, valor) {
   try { localStorage.setItem(chave, valor); } catch (_) { /* navegador sem armazenamento: só não lembra */ }
+}
+
+// Cards expandidos/contraídos (agenda e quadro): um modo geral + exceções por card, lembrados neste navegador
+function memoriaCards(chave) {
+  let s = { contraidos: false, excecoes: [] };
+  try { s = { ...s, ...JSON.parse(lerPreferencia(chave) || "{}") }; } catch (_) { /* preferência corrompida: padrão */ }
+  const excecoes = new Set(s.excecoes);
+  const gravar = () => gravarPreferencia(chave, JSON.stringify({ contraidos: s.contraidos, excecoes: [...excecoes] }));
+  return {
+    get todosContraidos() { return s.contraidos; },
+    contraido: (id) => s.contraidos !== excecoes.has(id),
+    alternar(id) {
+      if (!excecoes.delete(id)) excecoes.add(id);
+      gravar();
+      return s.contraidos !== excecoes.has(id);
+    },
+    definirTodos(contrair) { s.contraidos = contrair; excecoes.clear(); gravar(); },
+  };
+}
+
+function alternarCard(el, memoria) {
+  el.classList.toggle("contraido", memoria.alternar(Number(el.dataset.id)));
+}
+
+// Botão "Contrair todos / Expandir todos": muda todos os cards visíveis e zera as escolhas individuais
+function ligarExpandir(botao, memoria, seletor) {
+  const rotulo = () => { botao.textContent = memoria.todosContraidos ? "Expandir todos" : "Contrair todos"; };
+  botao.onclick = () => {
+    memoria.definirTodos(!memoria.todosContraidos);
+    document.querySelectorAll(seletor).forEach((c) => c.classList.toggle("contraido", memoria.todosContraidos));
+    rotulo();
+  };
+  rotulo();
 }
 
 async function api(url, opcoes = {}) {
@@ -80,8 +122,7 @@ async function carregarEstado() {
 // ---------- lista ----------
 function filtrosAtuais() {
   return {
-    q: $("#f-q").value.trim(), tribunal: $("#f-tribunal").value, orgao: $("#f-orgao").value,
-    de: $("#f-de").value, ate: $("#f-ate").value, novidades: $("#f-novidades").checked ? "true" : "",
+    q: $("#f-q").value.trim(), tribunal: $("#f-tribunal").value, novidades: $("#f-novidades").checked ? "true" : "",
     advogada: estado.advogada,
   };
 }
@@ -116,6 +157,12 @@ function etiquetaAdv(a) {
   return `<span class="etq-adv" style="--cor:${esc(a.cor)}" title="${esc(a.nome)} · OAB ${esc(a.oab_numero)}/${esc(a.oab_uf)}">${esc(primeiroNome(a))}</span>`;
 }
 
+// Etiqueta do responsável por um item de checklist: advogada com a cor dela; outras pessoas em cinza
+function etiquetaPessoa(p) {
+  const adv = p.advogada_id && advogadaPorId(p.advogada_id);
+  return adv ? etiquetaAdv(adv) : `<span class="etq-adv" style="--cor:#5a6270" title="${esc(p.nome_completo)}">${esc(p.nome)}</span>`;
+}
+
 function escolherAdvogada(id) {
   estado.advogada = id;
   gravarPreferencia("advogada", id);
@@ -139,13 +186,9 @@ function preencherAdvogadas() {
 
 function preencherFiltros() {
   preencherAdvogadas();
-  const selT = $("#f-tribunal"), selO = $("#f-orgao");
-  const t = selT.value, o = selO.value;
+  const selT = $("#f-tribunal"), t = selT.value;
   selT.innerHTML = `<option value="">Todos os tribunais</option>` +
     estado.filtros.tribunais.map((x) => `<option ${x === t ? "selected" : ""}>${esc(x)}</option>`).join("");
-  const orgaos = [...new Set(estado.filtros.orgaos.filter((x) => !t || x.tribunal === t).map((x) => x.orgao))];
-  selO.innerHTML = `<option value="">Todas as varas / órgãos</option>` +
-    orgaos.map((x) => `<option ${x === o ? "selected" : ""}>${esc(x)}</option>`).join("");
 }
 
 function partesTexto(p) {
@@ -525,7 +568,26 @@ async function abrirConfig() {
     ? `Chave configurada (termina em …${c.chave_final}). Cole uma nova só se quiser substituir.`
     : "Nenhuma chave configurada ainda.";
   $("#cfg-dias").value = c.backfill_dias;
+  await carregarPessoas();
+  renderEquipe();
   $("#dlg-config").showModal();
+}
+
+function renderEquipe() {
+  const equipe = estado.pessoas.filter((p) => !p.advogada_id && p.ativo);
+  $("#cfg-pessoas").innerHTML = equipe.map((p) => `
+    <span class="cfg-pessoa">${esc(p.nome)}<button type="button" class="ck-del" data-remover-pessoa="${p.chave.slice(2)}"
+      title="Tirar da lista" aria-label="Tirar ${esc(p.nome)} da lista">×</button></span>`).join("")
+    || `<span class="ajuda">Ninguém além das advogadas.</span>`;
+}
+
+async function alterarEquipe(url, opcoes) {
+  try {
+    estado.pessoas = await api(url, opcoes);
+    renderEquipe();
+  } catch (e) {
+    toast("Erro: " + e.message);
+  }
 }
 
 async function salvarConfig() {
@@ -556,6 +618,18 @@ function ligarEventos() {
   $("#add-enviar").onclick = enviarAdicionar;
   $("#add-arquivo").onchange = lerArquivo;
   $("#cfg-salvar").onclick = salvarConfig;
+  const addPessoa = () => {
+    const nome = $("#cfg-pessoa-nova").value.trim();
+    if (!nome) return;
+    $("#cfg-pessoa-nova").value = "";
+    alterarEquipe("/api/pessoas", { method: "POST", body: JSON.stringify({ nome }) });
+  };
+  $("#cfg-pessoa-add").onclick = addPessoa;
+  $("#cfg-pessoa-nova").onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); addPessoa(); } };
+  $("#cfg-pessoas").onclick = (ev) => {
+    const b = ev.target.closest("[data-remover-pessoa]");
+    if (b) alterarEquipe(`/api/pessoas/${b.dataset.removerPessoa}`, { method: "DELETE" });
+  };
   $("#btn-vistos").onclick = async () => {
     await api("/api/visto-todos" + (estado.advogada ? `?advogada=${estado.advogada}` : ""), { method: "POST" });
     toast("Tudo marcado como visto.");
@@ -564,10 +638,9 @@ function ligarEventos() {
 
   let espera;
   $("#f-q").oninput = () => { clearTimeout(espera); espera = setTimeout(carregarProcessos, 250); };
-  ["#f-tribunal", "#f-orgao", "#f-de", "#f-ate", "#f-novidades"].forEach((s) => { $(s).onchange = carregarProcessos; });
-  $("#f-tribunal").addEventListener("change", () => { $("#f-orgao").value = ""; });
+  ["#f-tribunal", "#f-novidades"].forEach((s) => { $(s).onchange = carregarProcessos; });
   $("#btn-limpar").onclick = () => {
-    ["#f-q", "#f-tribunal", "#f-orgao", "#f-de", "#f-ate"].forEach((s) => { $(s).value = ""; });
+    ["#f-q", "#f-tribunal"].forEach((s) => { $(s).value = ""; });
     $("#f-novidades").checked = false;
     escolherAdvogada("");
   };
@@ -601,5 +674,6 @@ function ligarEventos() {
 }
 
 ligarEventos();
+carregarPessoas();
 carregarEstado().catch((e) => toast("Erro: " + e.message));
 carregarProcessos().catch((e) => toast("Erro: " + e.message));

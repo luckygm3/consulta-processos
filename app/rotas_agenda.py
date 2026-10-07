@@ -1,7 +1,7 @@
 """Rotas da agenda/kanban, verificação de prazos, feriados e tipos de ato."""
 from fastapi import APIRouter, Body, HTTPException
 
-from . import agenda, cnj, db, prazos
+from . import agenda, checklist, cnj, config, db, prazos, quadro
 
 rotas = APIRouter(prefix="/api")
 
@@ -15,20 +15,69 @@ def _ou_400(fn, *args):
 
 @rotas.get("/agenda")
 def listar():
+    """Tarefas + cards do quadro (a agenda mostra os itens de checklist com data e o prazo fatal dos cards)."""
     with db.conexao() as con:
-        return {"tarefas": agenda.listar(con), "status": agenda.STATUS, "regras": agenda.regras()}
+        agenda.gerar_semanais(con)
+        return {"tarefas": agenda.listar(con), "cards": quadro.carregar(con)["cards"], "pessoas": checklist.pessoas(con),
+                "status": agenda.STATUS, "regras": agenda.regras()}
+
+
+@rotas.get("/checklist-padrao")
+def checklist_padrao():
+    """{"processo": [...], "preventivo": [...]} (arquivo checklists_padrao.txt)."""
+    return config.checklists_padrao()
+
+
+@rotas.post("/checklist/feito")
+def checklist_feito(dados: dict = Body(...)):
+    """Marca/desmarca um item na própria demanda (vale para a agenda e para o card ao mesmo tempo)."""
+    with db.conexao() as con:
+        ok = _ou_400(checklist.marcar, con, dados.get("dono"), int(dados.get("dono_id") or 0),
+                     str(dados.get("item") or ""), bool(dados.get("feito")))
+    if not ok:
+        raise HTTPException(404, "Item não encontrado")
+    return {"ok": True}
+
+
+@rotas.get("/pessoas")
+def pessoas():
+    with db.conexao() as con:
+        return checklist.pessoas(con)
+
+
+@rotas.post("/pessoas")
+def adicionar_pessoa(dados: dict = Body(...)):
+    with db.conexao() as con:
+        _ou_400(checklist.adicionar_pessoa, con, dados.get("nome") or "")
+        return checklist.pessoas(con)
+
+
+@rotas.delete("/pessoas/{pid}")
+def remover_pessoa(pid: int):
+    with db.conexao() as con:
+        checklist.remover_pessoa(con, pid)
+        return checklist.pessoas(con)
 
 
 @rotas.get("/agenda/alertas")
 def alertas():
     with db.conexao() as con:
-        return agenda.alertas(con)
+        agenda.gerar_semanais(con)  # roda ao abrir o app, antes de contar os alertas
+        cont = agenda.alertas(con)
+        # prazo fatal interno dos cards do quadro (o processual já é uma tarefa da agenda e já foi contado)
+        for c in quadro.carregar(con)["cards"]:
+            p = c["prazo"]
+            if p and p["tipo"] == "interno" and p["urgencia"] in ("vencido", "hoje", "amanha"):
+                cont["vencidos" if p["urgencia"] == "vencido" else p["urgencia"]] += 1
+        return cont
 
 
 @rotas.post("/agenda")
 def criar(dados: dict = Body(...)):
     if not (dados.get("titulo") or "").strip():
         raise HTTPException(400, "Informe o título")
+    if "checklist" not in dados:  # tarefa criada por ela nasce com a checklist padrão (a tela já manda preenchida)
+        dados["checklist"] = checklist.padrao("processo")
     with db.conexao() as con:
         tid = _ou_400(agenda.criar, con, {**dados, "origem": "manual"})
         return agenda.obter(con, tid)
@@ -42,6 +91,14 @@ def atualizar(tid: int, dados: dict = Body(...)):
     if not t:
         raise HTTPException(404, "Tarefa não encontrada")
     return t
+
+
+@rotas.post("/agenda/{tid}/restaurar")
+def restaurar(tid: int):
+    with db.conexao() as con:
+        if not agenda.restaurar(con, tid):
+            raise HTTPException(404, "Tarefa não está em Concluídos")
+        return agenda.obter(con, tid)
 
 
 @rotas.delete("/agenda/{tid}")
