@@ -64,12 +64,33 @@ function cardHTML(c) {
       ${c.tipo === "processo" && c.partes ? `<div class="c-partes">${esc(c.partes)}</div>` : ""}
       ${prazoLinhaHTML(c.prazo)}
       ${proximo ? `<div class="c-proximo"><span>Próximo:</span> ${esc(proximo.texto)}${proximo.data ? ` <span>· ${dataBr(proximo.data, false)}</span>` : ""}</div>` : ""}
+      ${anivLinhaHTML(c.aniversario)}
       ${tarde ? `<div class="c-tarde">${tarde} ${tarde > 1 ? "etapas" : "etapa"} depois do prazo fatal</div>` : ""}
       <div class="c-rodape"><button class="c-editar" type="button" data-editar>Editar</button></div>
     </article>`;
 }
 
 const cardPorId = (id) => qd.cards.find((c) => c.id === Number(id));
+
+// Aniversário no card: dd/mm discreto; destaque leve quando é hoje ou nos próximos 7 dias
+function diasAteAniversario(iso, hoje = new Date()) {
+  const h = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+  const [, m, d] = iso.split("-").map(Number);
+  const dia = (ano) => {
+    const bissexto = (ano % 4 === 0 && ano % 100 !== 0) || ano % 400 === 0;
+    return new Date(ano, m - 1, m === 2 && d === 29 && !bissexto ? 28 : d);
+  };
+  let prox = dia(h.getFullYear());
+  if (prox < h) prox = dia(h.getFullYear() + 1);
+  return Math.round((prox - h) / 864e5);
+}
+
+function anivLinhaHTML(iso) {
+  if (!iso) return "";
+  const n = diasAteAniversario(iso);
+  const quando = n === 0 ? " · <b>hoje!</b>" : n === 1 ? " · amanhã" : n <= 7 ? ` · em ${n} dias` : "";
+  return `<div class="c-aniv ${n <= 7 ? "perto" : ""}" title="Aniversário">🎂 ${iso.slice(8, 10)}/${iso.slice(5, 7)}${quando}</div>`;
+}
 
 // ---------- nome das colunas (clica e escreve; Enter salva, Esc desiste) ----------
 function renomearColuna(botao) {
@@ -207,6 +228,7 @@ async function abrirCard(c, coluna) {
   qd.tipo = c?.tipo || "processo";
   $("#qc-titulo-dlg").textContent = c ? "Cliente" : "Novo cliente";
   $("#qc-titulo").value = c?.titulo || "";
+  $("#qc-aniv").value = c?.aniversario || "";
   $("#qc-numero").value = c?.numero_fmt || "";
   $("#qc-prazo-desc").value = c?.prazo_descricao || "";
   $("#qc-prazo-data").value = c?.prazo_data || "";
@@ -229,14 +251,14 @@ async function salvarCard() {
     titulo: $("#qc-titulo").value.trim(), tipo: qd.tipo, checklist: qd.ck.valor(),
     numero: qd.tipo === "processo" ? $("#qc-numero").value : null,
     prazo_descricao: $("#qc-prazo-desc").value.trim(), prazo_data: $("#qc-prazo-data").value, prazo_hora: $("#qc-prazo-hora").value,
+    aniversario: $("#qc-aniv").value || null,
   };
   if (!d.titulo) { $("#qc-titulo").focus(); return; }
   try {
     if (qd.editando) await api(`/api/quadro/cards/${qd.editando.id}`, { method: "PATCH", body: JSON.stringify(d) });
     else await api("/api/quadro/cards", { method: "POST", body: JSON.stringify({ ...d, coluna_id: qd.coluna }) });
     $("#dlg-card").close();
-    carregarQuadro();
-    if (estado.tela === "agenda") carregarAgenda(); // aberto a partir de um item na agenda
+    recarregarTela(); // Xablau, ou a tela de onde o card foi aberto (Monitoramento, Agenda)
   } catch (e) {
     $("#qc-erro").textContent = e.message;
     $("#qc-erro").hidden = false;
@@ -249,8 +271,7 @@ async function excluirCard() {
   await api(`/api/quadro/cards/${c.id}`, { method: "DELETE" });
   $("#dlg-card").close();
   toast("Card excluído.");
-  carregarQuadro();
-  if (estado.tela === "agenda") carregarAgenda();
+  recarregarTela();
 }
 
 // Abre um card a partir da agenda (item da checklist ou prazo fatal do card). Sempre relê o quadro: um item pode ter
@@ -270,7 +291,11 @@ async function abrirCardPorId(id) {
 
 // ---------- eventos ----------
 function ligarQuadro() {
-  document.querySelector('[data-tela="quadro"]').textContent = NOME_QUADRO;
+  // menu lateral e topo: "Xablau (Clientes)"
+  const nome = `${NOME_QUADRO} (Clientes)`;
+  $("#sb-rotulo-quadro").textContent = nome;
+  document.querySelector('.sb-item[data-tela="quadro"]').title = nome;
+  CABECALHOS.quadro[0] = nome;
   TELAS.quadro = () => carregarQuadro();
   qd.ck = criarChecklist($("#qc-checklist"), { prazo: prazoDoCard });
   $("#qc-numero").addEventListener("input", buscarPrazoProcessual);

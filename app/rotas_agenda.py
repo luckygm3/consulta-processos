@@ -1,7 +1,9 @@
 """Rotas da agenda/kanban, verificação de prazos, feriados e tipos de ato."""
+from datetime import date
+
 from fastapi import APIRouter, Body, HTTPException
 
-from . import agenda, checklist, cnj, config, db, prazos, quadro
+from . import agenda, checklist, cnj, config, db, financeiro, prazos, quadro
 
 rotas = APIRouter(prefix="/api")
 
@@ -20,6 +22,26 @@ def listar():
         agenda.gerar_semanais(con)
         return {"tarefas": agenda.listar(con), "cards": quadro.carregar(con)["cards"], "pessoas": checklist.pessoas(con),
                 "status": agenda.STATUS, "regras": agenda.regras()}
+
+
+@rotas.get("/calendario")
+def calendario(de: str, ate: str):
+    """Tudo o que vai para a Agenda (calendário único): tarefas do monitoramento e cards do quadro (a tela tira
+    deles prazos, datas internas e itens de checklist com data), aniversários e lembretes das parcelas."""
+    with db.conexao() as con:
+        _ou_400(lambda: (date.fromisoformat(de), date.fromisoformat(ate)))
+        agenda.gerar_semanais(con)
+        return {"tarefas": agenda.listar(con), "cards": quadro.carregar(con)["cards"], "pessoas": checklist.pessoas(con),
+                "aniversarios": quadro.aniversarios(con, de, ate),
+                "parcelas": financeiro.lembretes(financeiro.listar(con), de, ate)}
+
+
+@rotas.post("/lembretes")
+def lembrete(dados: dict = Body(...)):
+    """Marca/desmarca um lembrete calculado (por ora, o aniversário de um ano) como feito."""
+    with db.conexao() as con:
+        _ou_400(quadro.marcar_lembrete, con, str(dados.get("chave") or ""), bool(dados.get("feito")))
+    return {"ok": True}
 
 
 @rotas.get("/checklist-padrao")

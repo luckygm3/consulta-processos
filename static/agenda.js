@@ -14,7 +14,8 @@ const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julh
   "novembro", "dezembro"];
 
 const ag = {
-  tarefas: [], cardsQuadro: [], visao: lerPreferencia("ag-visao") || "kanban", calModo: "mes", calRef: new Date(),
+  // o calendário saiu do Monitoramento (virou a tela Agenda, em calendario.js): preferência antiga cai no Kanban
+  tarefas: [], cardsQuadro: [], visao: lerPreferencia("ag-visao") === "lista" ? "lista" : "kanban",
   editando: null, ck: null, calculo: undefined, arrastando: null, feriadosCache: {}, vendoFeitas: false,
   memoria: memoriaCards("cards-agenda"), modelos: {},
 };
@@ -89,16 +90,20 @@ function tarefasFiltradas() {
     || (!t.advogada_id && t.advogadas_processo.includes(id)) || temItemDe(t.checklist, id)));
 }
 
-// Itens de checklist com data e prazo fatal interno dos cards do quadro: entram no Calendário e na Lista por data.
+// Itens de checklist com data e prazo fatal interno dos cards do quadro: entram na Agenda e na Lista por data.
 // Fonte única: são lidos das próprias demandas (tarefas e cards); nada é copiado para a agenda.
 function entradasAgenda() {
-  const f = filtrosAgenda();
+  return entradasDe(ag.tarefas, ag.cardsQuadro, filtrosAgenda());
+}
+
+// f = { adv: id da advogada ou "", proc: texto do filtro de processo }
+function entradasDe(tarefas, cards, f) {
   const id = Number(f.adv) || null;
   const pais = [
-    ...ag.tarefas.filter((t) => t.status !== "concluido").map((t) => ({
+    ...tarefas.filter((t) => t.status !== "concluido").map((t) => ({
       dono: "tarefa", id: t.id, nome: t.titulo, numero: t.numero, numero_fmt: t.numero_fmt, partes: t.partes,
       advs: t.advogada_id ? [t.advogada_id] : t.advogadas_processo, checklist: t.checklist, prazo: null })),
-    ...ag.cardsQuadro.map((c) => ({
+    ...cards.map((c) => ({
       dono: "card", id: c.id, nome: c.titulo, numero: c.numero, numero_fmt: c.numero_fmt, partes: c.partes,
       advs: c.advogadas_processo, checklist: c.checklist, prazo: c.prazo })),
   ];
@@ -122,13 +127,20 @@ async function marcarItem(dono, donoId, item, feito) {
   } catch (e) {
     toast("Erro: " + e.message);
   }
-  carregarAgenda();
+  recarregarTela();
 }
 
 // clicar num item ou prazo de card abre a demanda de onde ele veio
-function abrirPai(dono, id) {
+function abrirPai(dono, id, tarefas = ag.tarefas) {
   if (dono === "card") abrirCardPorId(id);
-  else abrirTarefa(ag.tarefas.find((t) => t.id === id));
+  else abrirTarefa(tarefas.find((t) => t.id === id));
+}
+
+// Depois de salvar algo: recarrega a tela aberta (Monitoramento, Agenda, Xablau…) e os selos do menu
+function recarregarTela() {
+  const carregar = TELAS[estado.tela];
+  if (carregar) carregar().catch((e) => toast("Erro: " + e.message));
+  carregarAlertas();
 }
 
 function preencherFiltrosAgenda() {
@@ -149,13 +161,11 @@ function renderAgenda() {
   $("#ag-concluidos").classList.toggle("ativa", feitas);
   $("#ag-concluidos").setAttribute("aria-pressed", feitas);
   $("#ag-kanban").hidden = feitas || ag.visao !== "kanban";
-  $("#ag-calendario").hidden = feitas || ag.visao !== "calendario";
   $("#ag-lista").hidden = feitas || ag.visao !== "lista";
   $("#ag-feitas").hidden = !feitas;
   $("#ag-expandir").hidden = feitas || ag.visao !== "kanban";
   if (feitas) renderFeitas(filtradas.filter((t) => t.status === "concluido"));
   else if (ag.visao === "kanban") renderKanban(lista);
-  else if (ag.visao === "calendario") renderCalendario(lista, entradasAgenda());
   else renderLista(lista, entradasAgenda());
   $("#ag-limpar").hidden = !Object.values(filtrosAgenda()).some(Boolean);
 }
@@ -229,7 +239,7 @@ async function moverTarefa(id, status) {
   } catch (e) {
     toast("Erro: " + e.message);
   }
-  carregarAgenda();
+  recarregarTela();
 }
 
 // ---------- concluídos ----------
@@ -265,7 +275,7 @@ async function restaurarTarefa(id) {
   } catch (e) {
     toast("Erro: " + e.message);
   }
-  carregarAgenda();
+  recarregarTela();
 }
 
 async function apagarDefinitivo(id) {
@@ -277,7 +287,7 @@ async function apagarDefinitivo(id) {
   } catch (e) {
     toast("Erro: " + e.message);
   }
-  carregarAgenda();
+  recarregarTela();
 }
 
 async function emLote(ids, acao) {
@@ -285,7 +295,7 @@ async function emLote(ids, acao) {
   if (acao === "descartar" && !confirm(`Descartar ${ids.length} sugestão(ões)? A publicação não volta a gerar sugestão.`)) return;
   const r = await api("/api/agenda/lote", { method: "POST", body: JSON.stringify({ ids, acao }) });
   toast(`${r.alterados} ${acao === "confirmar" ? "confirmado(s): foram para A fazer" : "descartado(s)"}.`);
-  carregarAgenda();
+  recarregarTela();
 }
 
 // ---------- calendário ----------
@@ -325,48 +335,6 @@ function prazoCardHTML(p, classe) {
     <span class="li-titulo">${rotulo}</span><span></span><span></span>
     <span class="li-status">${esc(typeof NOME_QUADRO === "string" ? NOME_QUADRO : "")}</span>
   </div>`;
-}
-
-async function renderCalendario(lista, { itens, prazos }) {
-  const ref = ag.calRef;
-  let ini, dias;
-  if (ag.calModo === "mes") {
-    ini = inicioSemana(new Date(ref.getFullYear(), ref.getMonth(), 1));
-    const fimMes = new Date(ref.getFullYear(), ref.getMonth() + 1, 0);
-    dias = Math.ceil(((fimMes - ini) / 864e5 + 1) / 7) * 7;
-    const mes = MESES[ref.getMonth()];
-    $("#cal-titulo").textContent = `${mes[0].toUpperCase() + mes.slice(1)} de ${ref.getFullYear()}`;
-  } else {
-    ini = inicioSemana(ref);
-    dias = 7;
-    const fim = new Date(ini.getTime() + 6 * 864e5);
-    $("#cal-titulo").textContent = `${dataBr(isoLocal(ini), false)} a ${dataBr(isoLocal(fim), false)}/${fim.getFullYear()}`;
-  }
-  document.querySelectorAll("#cal-modo [data-modo]").forEach((b) => b.classList.toggle("ativa", b.dataset.modo === ag.calModo));
-  const datas = Array.from({ length: dias }, (_, i) => isoLocal(new Date(ini.getFullYear(), ini.getMonth(), ini.getDate() + i)));
-  const feriados = await feriadosNoPeriodo(datas[0], datas[datas.length - 1]);
-  const hoje = isoLocal(new Date());
-  const porDia = (campo) => lista.reduce((m, t) => (t[campo] && (m[t[campo]] ||= []).push(t), m), {});
-  const fatais = porDia("prazo_fatal"), internas = porDia("data_interna");
-  const agrupar = (xs) => xs.reduce((m, x) => ((m[x.data] ||= []).push(x), m), {});
-  const itensDia = agrupar(itens), prazosDia = agrupar(prazos);
-  $("#cal-grade").className = `cal-grade ${ag.calModo}`;
-  $("#cal-grade").innerHTML = SEMANA.map((s) => `<div class="cal-cab">${s}</div>`).join("") + datas.map((iso) => {
-    const dt = new Date(iso + "T12:00:00");
-    const fora = ag.calModo === "mes" && dt.getMonth() !== ref.getMonth();
-    const fer = feriados.filter((f) => f.data === iso);
-    const chips = (fatais[iso] || []).map((t) =>
-      `<button type="button" class="cal-chip u-${t.urgencia}" data-id="${t.id}" title="${esc(t.titulo)} — ${esc(t.numero_fmt)}">${t.tipo === "audiencia" ? "" : marcaPrazo(t.prazo_tipo)}${t.hora && !t.titulo.includes(t.hora) ? esc(t.hora) + " " : ""}${esc(t.titulo)}</button>`);
-    const ints = (internas[iso] || []).filter((t) => t.data_interna !== t.prazo_fatal && t.status !== "concluido").map((t) =>
-      `<button type="button" class="cal-chip interno" data-id="${t.id}" title="Data interna: ${esc(t.titulo)}">↳ ${esc(t.titulo)}</button>`);
-    const pzs = (prazosDia[iso] || []).map((p) => prazoCardHTML(p, "cal"));
-    const its = (itensDia[iso] || []).sort((a, b) => (a.hora || "99").localeCompare(b.hora || "99")).map((c) => itemAgendaHTML(c, "cal-item"));
-    return `<div class="cal-dia ${fora ? "fora" : ""} ${iso === hoje ? "hoje" : ""} ${fer.length || dt.getDay() % 6 === 0 ? "nao-util" : ""}" data-dia="${iso}">
-      <div class="cal-num">${dt.getDate()}</div>
-      ${fer.map((f) => `<div class="cal-fer" title="${esc(f.descricao)}${f.tribunais ? " — " + esc(f.tribunais) : ""}${f.comarca ? " — " + esc(f.comarca) : ""}">${esc(f.descricao)}${f.tribunais ? ` <small>(${esc(f.tribunais.length > 12 ? "alguns tribunais" : f.tribunais)})</small>` : ""}</div>`).join("")}
-      ${chips.join("")}${pzs.join("")}${ints.join("")}${its.join("")}
-    </div>`;
-  }).join("");
 }
 
 // ---------- lista por data ----------
@@ -512,7 +480,7 @@ async function salvarTarefa(status = null) {
     else await api("/api/agenda", { method: "POST", body: JSON.stringify(d) });
     $("#dlg-tarefa").close();
     toast({ a_fazer: "Prazo confirmado: foi para A fazer.", concluido: "Concluída: foi para Concluídos." }[status] || "Salvo.");
-    carregarAgenda();
+    recarregarTela();
   } catch (e) {
     toast("Erro: " + e.message);
   }
@@ -525,7 +493,7 @@ async function excluirTarefa() {
   await api(`/api/agenda/${t.id}`, { method: "DELETE" });
   $("#dlg-tarefa").close();
   toast(djen ? "Descartado." : "Excluída.");
-  carregarAgenda();
+  recarregarTela();
 }
 
 // ---------- verificar prazos ----------
@@ -543,7 +511,7 @@ async function rodarVerificacao() {
       ${r.ja_vencidos ? `<div>${r.ja_vencidos} com prazo já vencido não viraram cartão (marque a opção acima para incluí-los).</div>` : ""}
       ${r.erros ? `<div class="ruim">${r.erros} erro(s): veja logs/app.log.</div>` : ""}`
       : "Nenhuma publicação nova para analisar. Use “Atualizar tudo” para buscar publicações no DJEN.";
-    carregarAgenda();
+    recarregarTela();
   } catch (e) {
     $("#v-resultado").hidden = false;
     $("#v-resultado").innerHTML = `<div class="ruim">Erro: ${esc(e.message)}</div>`;
@@ -631,6 +599,15 @@ async function carregarAlertas() {
   const badge = $("#qtd-aba-agenda");
   badge.hidden = !(proximos || a.vencidos);
   badge.textContent = proximos + a.vencidos;
+  badge.title = `${proximos} vencem hoje/amanhã, ${a.vencidos} vencidos`;
+  // selo do Financeiro: parcelas vencidas e não pagas
+  try {
+    const f = await api("/api/financeiro/atrasadas");
+    const fin = $("#qtd-aba-fin");
+    fin.hidden = !f.atrasadas;
+    fin.textContent = f.atrasadas;
+    fin.title = `${f.atrasadas} parcela(s) em atraso`;
+  } catch (_) { /* servidor antigo, sem financeiro: só não mostra o selo */ }
 }
 
 // ---------- feriados ----------
@@ -716,15 +693,39 @@ async function salvarTipos() {
 }
 
 // ---------- telas ----------
-// Telas do app e o que carregar ao abrir cada uma (quadro.js acrescenta a sua)
+// Telas do app e o que carregar ao abrir cada uma (quadro.js, calendario.js e financeiro.js acrescentam as suas)
 const TELAS = { processos: null, agenda: () => carregarAgenda() };
+// Título e descrição no topo (Andamentos mostra as OABs; o nome do quadro vem de quadro.js)
+const CABECALHOS = {
+  processos: ["Andamentos Processuais", null],
+  agenda: ["Monitoramento", "Prazos que o sistema cria para lembrar de monitorar, avaliar a pertinência e incluir no checklist do cliente."],
+  quadro: ["Clientes", "Um cartão por cliente, com a checklist das demandas e a data de aniversário."],
+  calendario: ["Agenda", "Tudo num calendário só: monitoramento, checklists dos clientes, aniversários e parcelas."],
+  financeiro: ["Financeiro", "Honorários: entradas, parcelas, o que já entrou e o que falta receber."],
+};
+
+function atualizarCabecalho() {
+  const [titulo, descricao] = CABECALHOS[estado.tela] || CABECALHOS.processos;
+  $("#titulo-tela").textContent = titulo;
+  $("#identidade").textContent = descricao ?? (estado.identidade || " ");
+  document.title = `${titulo} · Meus processos`;
+  // botões do topo que só fazem sentido para processos/publicações
+  $("#btn-adicionar").hidden = estado.tela !== "processos";
+  $("#btn-atualizar").hidden = $("#ultima").hidden = !["processos", "agenda"].includes(estado.tela);
+}
 
 function mostrarTela(tela) {
   if (!(tela in TELAS)) tela = "processos";
   estado.tela = tela;
   gravarPreferencia("tela", tela);
-  document.querySelectorAll("[data-tela]").forEach((b) => b.classList.toggle("ativa", b.dataset.tela === tela));
+  document.querySelectorAll("[data-tela]").forEach((b) => {
+    b.classList.toggle("ativa", b.dataset.tela === tela);
+    if (b.dataset.tela === tela) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  });
   Object.keys(TELAS).forEach((t) => { $(`#tela-${t}`).hidden = t !== tela; });
+  atualizarCabecalho();
+  fecharMenuGaveta();
+  window.scrollTo(0, 0);
   if (TELAS[tela]) TELAS[tela]().catch((e) => toast("Erro: " + e.message));
 }
 
@@ -879,25 +880,6 @@ function ligarAgenda() {
     const id = ag.arrastando ?? Number(ev.dataTransfer.getData("text/plain"));
     ag.arrastando = null;
     moverTarefa(id, col.dataset.status);
-  });
-
-  // calendário
-  document.querySelectorAll("[data-cal]").forEach((b) => {
-    b.onclick = () => {
-      const passo = Number(b.dataset.cal), r = ag.calRef;
-      if (!passo) ag.calRef = new Date();
-      else if (ag.calModo === "mes") ag.calRef = new Date(r.getFullYear(), r.getMonth() + passo, 1);
-      else ag.calRef = new Date(r.getFullYear(), r.getMonth(), r.getDate() + 7 * passo);
-      renderAgenda();
-    };
-  });
-  $("#cal-modo").onclick = (ev) => {
-    const b = ev.target.closest("[data-modo]");
-    if (b) { ag.calModo = b.dataset.modo; renderAgenda(); }
-  };
-  $("#cal-grade").addEventListener("dblclick", (ev) => {
-    const dia = ev.target.closest("[data-dia]");
-    if (dia && !ev.target.closest("[data-id], [data-dono]")) abrirTarefa(null, { prazo_fatal: dia.dataset.dia, data_interna: dia.dataset.dia });
   });
 
   // diálogo da tarefa

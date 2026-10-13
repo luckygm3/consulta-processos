@@ -11,7 +11,8 @@ from . import cnj, config, texto as txt
 from .config import DB_DIR, DB_PATH
 
 log = logging.getLogger("db")
-SCHEMA_VERSAO = 5  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas
+SCHEMA_VERSAO = 6  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas;
+#                   6 = financeiro e aniversários
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS processos (
@@ -173,7 +174,8 @@ CREATE TABLE IF NOT EXISTS quadro_cards (        -- cards de cliente do quadro
     atualizado_em     TEXT,
     prazo_descricao   TEXT,                  -- prazo fatal interno (cards sem processo); o processual vem da agenda
     prazo_data        TEXT,
-    prazo_hora        TEXT
+    prazo_hora        TEXT,
+    aniversario       TEXT                   -- AAAA-MM-DD; gera "Parabenizar <cliente>" todo ano na Agenda
 );
 CREATE INDEX IF NOT EXISTS ix_quadro_cards ON quadro_cards(coluna_id, posicao);
 CREATE TABLE IF NOT EXISTS pessoas (             -- responsáveis nos itens da checklist, além das advogadas
@@ -187,6 +189,34 @@ CREATE TABLE IF NOT EXISTS comunicacao_analise ( -- publicações já varridas p
     analisado_em      TEXT,
     resultado         TEXT,                  -- prazo | sem_prazo | ja_vencido | erro
     detalhe           TEXT
+);
+CREATE TABLE IF NOT EXISTS lancamentos (         -- financeiro: um contrato de honorários (entrada + parcelas)
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    cliente           TEXT NOT NULL,         -- nome por extenso
+    numero            TEXT,                  -- processo vinculado (opcional)
+    valor_total       INTEGER NOT NULL,      -- valores em centavos (sem erro de arredondamento)
+    entrada           INTEGER NOT NULL DEFAULT 0,
+    entrada_data      TEXT,
+    valor_parcela     INTEGER NOT NULL DEFAULT 0,
+    qtd_parcelas      INTEGER NOT NULL DEFAULT 0,
+    observacoes       TEXT,
+    criado_em         TEXT,
+    atualizado_em     TEXT
+);
+CREATE TABLE IF NOT EXISTS parcelas (            -- entrada (numero 0) e parcelas (1..n) de cada lançamento
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    lancamento_id     INTEGER NOT NULL,
+    numero            INTEGER NOT NULL,
+    vencimento        TEXT NOT NULL,         -- AAAA-MM-DD (o lembrete no calendário cai no dia seguinte)
+    valor             INTEGER NOT NULL,      -- centavos
+    pago              INTEGER NOT NULL DEFAULT 0,
+    pago_em           TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_parcelas ON parcelas(lancamento_id, numero);
+CREATE INDEX IF NOT EXISTS ix_parcelas_venc ON parcelas(vencimento);
+CREATE TABLE IF NOT EXISTS lembretes_feitos (    -- lembretes calculados (ex.: aniversário) marcados como feitos
+    chave             TEXT PRIMARY KEY,      -- ex.: aniv:<card>:<ano>
+    feito_em          TEXT
 );
 """
 
@@ -272,6 +302,11 @@ def _migrar(con):
                 con.execute(f"UPDATE {tabela} SET checklist=? WHERE id=?",
                             (json.dumps(ler(r["checklist"]), ensure_ascii=False), r["id"]))
         log.info("Migração do banco: checklist com datas e responsáveis")
+    if versao < 6:
+        # v5 -> v6: financeiro (tabelas novas, criadas pelo SCHEMA) e aniversário do cliente no card do quadro
+        if "aniversario" not in [r["name"] for r in con.execute("PRAGMA table_info(quadro_cards)")]:
+            con.execute("ALTER TABLE quadro_cards ADD COLUMN aniversario TEXT")
+        log.info("Migração do banco: financeiro e aniversários")
     if versao < SCHEMA_VERSAO:
         meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
     semear_feriados(con)

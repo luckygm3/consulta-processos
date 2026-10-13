@@ -1,6 +1,7 @@
 """Quadro de clientes (aba com nome provisório, definido em static/quadro.js): 5 colunas que ela nomeia, cards de
 cliente criados à mão, com a checklist padrão, ligados a um processo ou marcados como petição inicial (o processo
 ainda não existe) ou preventivo/consultoria."""
+import calendar
 import json
 import re
 from datetime import date
@@ -92,6 +93,11 @@ def _valores(dados: dict, tipo_atual: str | None = None) -> dict:
             hora = None
         v["prazo_descricao"] = (dados.get("prazo_descricao") or "").strip()[:120] or None
         v["prazo_data"], v["prazo_hora"] = data, hora
+    if "aniversario" in dados:
+        aniv = str(dados.get("aniversario") or "")[:10] or None
+        if aniv:
+            date.fromisoformat(aniv)  # ValueError -> 400
+        v["aniversario"] = aniv
     if v.get("tipo") == "processo":  # com processo, o prazo fatal é o processual (vem da agenda)
         v["prazo_descricao"] = v["prazo_data"] = v["prazo_hora"] = None
     return v
@@ -135,3 +141,40 @@ def ordenar(con, coluna_id: int, ids: list[int]):
 def renomear_coluna(con, coluna_id: int, nome: str) -> bool:
     cur = con.execute("UPDATE quadro_colunas SET nome=? WHERE id=?", ((nome or "").strip()[:60], coluna_id))
     return cur.rowcount > 0
+
+
+# --- aniversários: "Parabenizar <cliente>" todo ano, calculado na hora (nada é copiado para a agenda) -----------
+
+def dia_do_aniversario(aniversario: str, ano: int) -> date:
+    """Data do aniversário naquele ano; quem nasceu em 29/02 é lembrado em 28/02 nos anos comuns."""
+    mes, dia = int(aniversario[5:7]), int(aniversario[8:10])
+    if mes == 2 and dia == 29 and not calendar.isleap(ano):
+        dia = 28
+    return date(ano, mes, dia)
+
+
+def aniversarios(con, de: str, ate: str) -> list[dict]:
+    """Ocorrências entre de e ate (AAAA-MM-DD). Feito vale por ano (tabela lembretes_feitos, chave aniv:<card>:<ano>)."""
+    a, b = date.fromisoformat(de), date.fromisoformat(ate)
+    feitos = {r[0] for r in con.execute("SELECT chave FROM lembretes_feitos WHERE chave LIKE 'aniv:%'")}
+    saida = []
+    for r in con.execute("SELECT id, titulo, aniversario FROM quadro_cards WHERE aniversario IS NOT NULL AND aniversario != ''"):
+        for ano in range(a.year, b.year + 1):
+            try:
+                dia = dia_do_aniversario(r["aniversario"], ano)
+            except ValueError:
+                break  # data gravada com defeito: ignora este card
+            if a <= dia <= b:
+                chave = f"aniv:{r['id']}:{ano}"
+                saida.append({"chave": chave, "card_id": r["id"], "cliente": r["titulo"], "data": dia.isoformat(),
+                              "feito": chave in feitos})
+    return sorted(saida, key=lambda x: (x["data"], x["cliente"]))
+
+
+def marcar_lembrete(con, chave: str, feito: bool):
+    if not re.fullmatch(r"aniv:\d+:\d{4}", chave or ""):
+        raise ValueError("Lembrete inválido")
+    if feito:
+        con.execute("INSERT OR REPLACE INTO lembretes_feitos(chave, feito_em) VALUES(?, ?)", (chave, db.agora()))
+    else:
+        con.execute("DELETE FROM lembretes_feitos WHERE chave=?", (chave,))

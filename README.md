@@ -53,6 +53,13 @@ O DJEN (publicações) não precisa de chave.
 
 ## Uso
 
+O **menu lateral** tem as cinco telas: **Andamentos Processuais**, **Monitoramento**, **Xablau (Clientes)**,
+**Agenda** e **Financeiro**, além de **Configurações** no pé. O selo vermelho no Monitoramento conta prazos que
+vencem hoje/amanhã ou já venceram; no Financeiro, parcelas em atraso. **Recolher** deixa só os ícones (o app lembra);
+em tela estreita (celular) o menu vira uma gaveta aberta pelo **☰**.
+
+### Andamentos Processuais
+
 - **Atualizar tudo**: busca publicações no DJEN pela OAB de cada advogada e, em seguida, consulta cada processo no DataJud.
   Cada processo fica vinculado a quem o encontrou; se aparecer para as duas, fica com as duas.
   A primeira vez busca os últimos 180 dias (ajustável em ⚙); depois, só o que é novo.
@@ -63,12 +70,15 @@ O DJEN (publicações) não precisa de chave.
 - **NOVO** marca processos com publicação ou movimento capturado depois da última vez que você marcou como visto.
 - Clique num processo para ver a linha do tempo (publicações + movimentos) e o texto completo das publicações.
 
-## Agenda e prazos (aba “Agenda”)
+## Monitoramento (prazos)
 
 > **Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal.**
 
-- Três visões: **Kanban** (Sugeridos → A fazer → Em andamento → Aguardando terceiros; arraste os cartões),
-  **Calendário** (mês/semana, com feriados) e **Lista por data**. Filtros por advogada e por processo.
+Prazos que o sistema cria para lembrar de monitorar, avaliar a pertinência e incluir no checklist do cliente
+(era a aba “Agenda”; o calendário dela passou para a tela **Agenda**, que junta tudo).
+
+- Duas visões: **Kanban** (Sugeridos → A fazer → Em andamento → Aguardando terceiros; arraste os cartões) e
+  **Lista por data**. Filtros por advogada e por processo.
 - **Concluídos**: o ícone ao lado das visões. Conclua pelo círculo do cartão (aparece ao passar o mouse), pela lista,
   pelo botão **✓ Concluir** da tarefa, ou arrastando o cartão até o ícone. Lá dentro: **Restaurar** (volta para a
   coluna de onde saiu) ou **Excluir definitivamente**.
@@ -84,7 +94,7 @@ O DJEN (publicações) não precisa de chave.
   e, opcionais, **data**, **horário** (só com data) e **responsável** — clique no ícone do item (ou nas etiquetas dele)
   para abrir esses campos. Arraste pela alça para reordenar; edite, exclua e adicione itens. Progresso discreto (“3/17”).
   - **Responsáveis**: as advogadas e as pessoas da **Equipe** (⚙ Configurações → Equipe; vale na hora).
-  - **Na agenda**: todo item com data aparece no **Calendário** e na **Lista por data**, no dia/horário dele, como
+  - **Na agenda**: todo item com data aparece na **Agenda** e na **Lista por data**, no dia/horário dele, como
     “Elaboração do Mérito · Fulano” (nome da demanda), mais leve que os prazos. A caixinha marca como feito — é o mesmo
     item do card/tarefa (nada é copiado), então vale nos dois lugares. Clicar no texto abre a demanda. Itens sem data
     ficam só dentro dela; itens feitos saem da lista (no calendário ficam riscados). O Kanban não mostra itens.
@@ -115,9 +125,13 @@ O DJEN (publicações) não precisa de chave.
   ou só as filtradas; sugestões não confirmadas ficam de fora.
 - Ao abrir o app, uma faixa avisa quantos prazos vencem hoje/amanhã e quantos estão vencidos.
 
-## Quadro de clientes (aba “Xablau”)
+## Xablau (Clientes)
 
-O nome da aba é provisório: troque a constante `NOME_QUADRO` no começo de `static/quadro.js`.
+O nome é provisório: troque a constante `NOME_QUADRO` no começo de `static/quadro.js`.
+
+- **Aniversário** do cliente (campo no card): a Agenda mostra **“Parabenizar <cliente>”** todo ano nesse dia, com
+  caixinha de feito (vale só para aquele ano; no ano seguinte aparece de novo). Quem nasceu em 29/02 é lembrado em 28/02
+  nos anos comuns. O card mostra o dia e destaca quando faltam 7 dias ou menos.
 
 - Kanban de clientes com o mesmo visual da agenda: **5 colunas** que nascem sem nome. Clique em “Nomear coluna” para
   dar o nome (ex.: Trabalhista, Pro bono); clique de novo para renomear. Enter salva, Esc desiste.
@@ -131,6 +145,40 @@ O nome da aba é provisório: troque a constante `NOME_QUADRO` no começo de `st
 - Arraste os cards entre colunas ou dentro da mesma coluna (uma linha azul mostra onde vão cair).
 - Expandido, o card mostra o processo (clique para abrir), as partes e o próximo item da checklist; contraído, só o
   nome e o progresso. Mesmo botão **Contrair todos / Expandir todos** da agenda.
+
+## Agenda (calendário único)
+
+Um calendário só, por mês ou por semana, com feriados. Junta, sem copiar nada (marcar feito vale na origem):
+
+- **Monitoramento**: prazo fatal (cor da urgência) e data interna (contorno tracejado) das tarefas, e os itens com data
+  das checklists delas;
+- **Checklists dos clientes**: itens com data dos cards do Xablau e o prazo fatal interno do card;
+- **Aniversários**: “Parabenizar <cliente>”, todo ano;
+- **Financeiro**: cada parcela (e a entrada) aparece **1 dia depois do vencimento**, para conferir se foi paga. A
+  caixinha marca como paga com a data de hoje (para outra data, abra o lançamento); em atraso fica em vermelho.
+
+Os botões acima do calendário ligam e desligam cada origem (o app lembra); o filtro de advogada vale para o
+Monitoramento e as checklists. Dia com muita coisa mostra 4 itens e “+N mais”. Clicar num item abre a tarefa, o card
+ou o lançamento de onde ele veio; dois cliques num dia criam uma tarefa de monitoramento com essa data.
+
+## Financeiro
+
+- **+ Novo lançamento**: nome do cliente (por extenso; sugere os nomes do Xablau), processo vinculado (opcional),
+  valor total, valor da entrada, valor das parcelas, quantidade de parcelas, data de pagamento da entrada e
+  vencimento da 1ª parcela. Os vencimentos são gerados **um por mês** a partir da 1ª data (31/01 → 28/02 → 31/03) e
+  podem ser mudados um a um, inclusive o valor de cada parcela. Depois de mexer à mão, mudar a quantidade ou a 1ª data
+  não apaga suas edições: aparece **Regerar vencimentos**.
+- **Conferência**: entrada + parcelas tem de dar o total. Se não der, o formulário mostra a diferença e oferece
+  **Usar … como total** ou **Recalcular parcelas** ((total − entrada) ÷ quantidade; os centavos que sobram vão para a
+  última). Dá para salvar mesmo sem fechar, com confirmação.
+- **Paga**: caixinha em cada parcela (no lançamento, na tabela ou na Agenda), com a data do pagamento (padrão: hoje;
+  editável). O saldo (recebido / falta receber) é recalculado na hora. Entrada com data de hoje ou passada já nasce
+  marcada como paga nessa data (dá para desmarcar).
+- **Painel**: cards com *a receber no mês* (com ‹ › para outros meses), *recebido no mês*, *recebido no ano*,
+  *total a receber* e *em atraso*; **Inadimplentes** (parcelas vencidas e não pagas, com valor e dias de atraso, por
+  cliente) e **Próximas parcelas**. Embaixo, a tabela de **Parcelas** (Todas / Pendentes / Pagas / Atrasadas, busca e
+  “só vencimentos do mês”) e a visão **Por cliente** (total, recebido, quanto falta, em atraso e próximo vencimento).
+- Valores em R$ (digite `1500`, `1.500` ou `1.500,00`); guardados em centavos, sem erro de arredondamento.
 
 ### Regras do cálculo (`app/prazos.py`)
 
@@ -185,10 +233,12 @@ Testes do cálculo e da detecção: `.venv\Scripts\python -m unittest discover -
 ```
 app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, texto.py, main.py;
             agenda: prazos.py (calendário e cálculo), extrair.py (regex), agenda.py, rotas_agenda.py;
-            quadro de clientes: quadro.py, rotas_quadro.py; checklist.py (itens, "feito" e equipe)
-static/     interface (HTML/CSS/JS puro; agenda.js = aba Agenda; quadro.js = quadro de clientes;
+            quadro de clientes: quadro.py (inclui aniversários), rotas_quadro.py; checklist.py (itens, "feito" e equipe);
+            financeiro: financeiro.py, rotas_financeiro.py
+static/     interface (HTML/CSS/JS puro; app.js = Andamentos e menu lateral; agenda.js = Monitoramento;
+            quadro.js = Xablau; calendario.js = Agenda; financeiro.js = Financeiro;
             checklist.js = editor de checklist reutilizável)
-tests/      testes do cálculo de prazos, da detecção no texto, da agenda e do quadro
+tests/      testes do cálculo de prazos, da detecção no texto, da agenda, do quadro e do financeiro
 db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git.
             Antes de mudar a estrutura do banco, o app guarda uma cópia (processos.sqlite3.bak-AAAAMMDD)
 logs/       app.log (erros de rede e dos tribunais)

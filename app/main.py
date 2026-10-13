@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import cnj, config, db, rotas_agenda, rotas_quadro
+from . import cnj, config, db, rotas_agenda, rotas_financeiro, rotas_quadro
 from .config import STATIC_DIR
 from .sync import sincronizador
 
@@ -19,6 +19,7 @@ app = FastAPI(title="Processos", docs_url=None, redoc_url=None, openapi_url=None
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(rotas_agenda.rotas)
 app.include_router(rotas_quadro.rotas)
+app.include_router(rotas_financeiro.rotas)
 
 SEM_CACHE = {"Cache-Control": "no-cache"}
 

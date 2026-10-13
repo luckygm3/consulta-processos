@@ -4,18 +4,21 @@
       "nome": "Beatriz Daffara",
       "oab_numero": "130678",
       "oab_uf": "PR",
-      "cor": "#7c3aed"
+      "cor": "#41ecb9"
     },
     {
       "nome": "Kazuza",
       "oab_numero": "130152",
       "oab_uf": "PR",
-      "cor": "#0f766e"
+      "cor": "#c144ee"
     }
   ],
   "datajud_api_key": "cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw==",
   "backfill_dias": 180,
   "janela_dias": 30,
   "buscar_tambem_por_nome": false,
+  "prazos_regra_publicacao": "djen",
+  "prazos_dias_internos": 2,
+  "prazos_contagem_padrao": "uteis",
   "porta": 8000
 }

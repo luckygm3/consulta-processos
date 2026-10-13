@@ -85,6 +85,29 @@ function fmtData(iso) {
   return `${d}/${m}/${a}`;
 }
 
+// dd/mm/aaaa (sem "hoje"/"ontem"), para o financeiro e o calendário
+function dataBrCompleta(iso) {
+  if (!iso) return "";
+  const [a, m, d] = iso.slice(0, 10).split("-");
+  return `${d}/${m}/${a}`;
+}
+
+// Valores em centavos (inteiros) -> "R$ 1.234,56"
+const FORMATO_REAIS = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
+function reais(centavos) {
+  return FORMATO_REAIS.format((Number(centavos) || 0) / 100).replace(/ /g, " ");
+}
+
+// "R$ 1.234,56", "1234,56", "1.500" (mil e quinhentos) ou "1500.5" -> centavos; vazio = 0; inválido = null
+function lerReais(texto) {
+  let s = String(texto ?? "").replace(/R\$|\s/g, "");
+  if (!s) return 0;
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  if (!/^\d+(\.\d{0,2})?$/.test(s)) return null;
+  return Math.round(parseFloat(s) * 100);
+}
+
 function fmtDataHora(iso) {
   if (!iso) return "";
   const hora = iso.length > 10 ? iso.slice(11, 16) : "";
@@ -110,9 +133,10 @@ const SEM_DADOS = "sem dados públicos (possível segredo de justiça)";
 async function carregarEstado() {
   const e = await api("/api/estado");
   estado.advogadas = e.advogadas || [];
-  $("#identidade").textContent = estado.advogadas.length
+  estado.identidade = estado.advogadas.length
     ? estado.advogadas.map((a) => `${a.nome} · OAB ${a.oab_numero}/${a.oab_uf}`).join("   |   ")
     : [e.nome, e.oab && `OAB ${e.oab}`].filter(Boolean).join(" · ");
+  atualizarCabecalho(); // subtítulo do topo: as OABs nos Andamentos, a descrição da tela nas outras
   $("#ultima").textContent = e.ultima_atualizacao ? `Última atualização: ${fmtDataHora(e.ultima_atualizacao)}` : "Ainda não atualizado";
   $("#aviso-chave").hidden = e.tem_chave;
   if (e.sync.rodando) acompanharSync();
@@ -609,11 +633,43 @@ async function salvarConfig() {
   }
 }
 
+// ---------- menu lateral ----------
+// Computador: recolhe para só ícones (lembrado neste navegador). Tela estreita: vira gaveta, aberta pelo ☰.
+const telaEstreita = () => matchMedia("(max-width: 900px)").matches;
+
+function recolherMenu(recolher) {
+  document.body.classList.toggle("sb-recolhida", recolher);
+  $("#sb-recolher").setAttribute("aria-expanded", !recolher);
+  $("#sb-recolher").title = recolher ? "Expandir menu" : "Recolher menu";
+  $("#sb-recolher").setAttribute("aria-label", $("#sb-recolher").title);
+  gravarPreferencia("menu-recolhido", recolher ? "1" : "");
+}
+
+function abrirMenuGaveta(abrir) {
+  document.body.classList.toggle("sb-aberta", abrir);
+  $("#sb-fundo").hidden = !abrir;
+  $("#sb-abrir").setAttribute("aria-expanded", abrir);
+  if (abrir) $("#sidebar .sb-item.ativa")?.focus();
+}
+
+function fecharMenuGaveta() {
+  if (document.body.classList.contains("sb-aberta")) abrirMenuGaveta(false);
+}
+
+function ligarMenu() {
+  recolherMenu(lerPreferencia("menu-recolhido") === "1");
+  $("#sb-recolher").onclick = () => recolherMenu(!document.body.classList.contains("sb-recolhida"));
+  $("#sb-abrir").onclick = () => abrirMenuGaveta(true);
+  $("#sb-fundo").onclick = fecharMenuGaveta;
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && telaEstreita()) fecharMenuGaveta(); });
+}
+
 // ---------- eventos ----------
 function ligarEventos() {
+  ligarMenu();
   $("#btn-atualizar").onclick = atualizarTudo;
   $("#btn-adicionar").onclick = abrirAdicionar;
-  $("#btn-config").onclick = abrirConfig;
+  $("#btn-config").onclick = () => { fecharMenuGaveta(); abrirConfig(); };
   document.querySelectorAll("[data-abrir-config]").forEach((b) => { b.onclick = abrirConfig; });
   $("#add-enviar").onclick = enviarAdicionar;
   $("#add-arquivo").onchange = lerArquivo;
