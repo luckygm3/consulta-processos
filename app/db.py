@@ -11,8 +11,9 @@ from . import cnj, config, texto as txt
 from .config import DB_DIR, DB_PATH
 
 log = logging.getLogger("db")
-SCHEMA_VERSAO = 7  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas;
-#                   6 = financeiro e aniversários; 7 = pagamentos parciais e cliente inadimplente
+SCHEMA_VERSAO = 8  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas;
+#                   6 = financeiro e aniversários; 7 = pagamentos parciais e cliente inadimplente;
+#                   8 = processos em cooperação
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS processos (
@@ -39,7 +40,9 @@ CREATE TABLE IF NOT EXISTS processos (
     novidade_em       TEXT,                  -- quando algo novo foi capturado
     visto_em          TEXT,                  -- quando a advogada marcou como visto
     busca             TEXT,                  -- texto normalizado para busca
-    criado_em         TEXT
+    criado_em         TEXT,
+    cooperacao        INTEGER NOT NULL DEFAULT 0, -- 1 = consta advogado de cooperação (marcado a cada sincronização)
+    cooperacao_manual INTEGER                -- marcação à mão (1/0), vale por cima da automática; NULL = automática
 );
 CREATE TABLE IF NOT EXISTS comunicacoes (
     hash              TEXT PRIMARY KEY,
@@ -325,6 +328,14 @@ def _migrar(con):
                        SELECT id, valor, COALESCE(pago_em, vencimento), ? FROM parcelas
                        WHERE pago=1 AND valor > 0 AND id NOT IN (SELECT parcela_id FROM pagamentos)""", (agora(),))
         log.info("Migração do banco: pagamentos parciais e cliente inadimplente")
+    if versao < 8:
+        # v7 -> v8: processos em cooperação (marcação automática pelos advogados das publicações + marcação à mão)
+        colunas = [r["name"] for r in con.execute("PRAGMA table_info(processos)")]
+        if "cooperacao" not in colunas:
+            con.execute("ALTER TABLE processos ADD COLUMN cooperacao INTEGER NOT NULL DEFAULT 0")
+        if "cooperacao_manual" not in colunas:
+            con.execute("ALTER TABLE processos ADD COLUMN cooperacao_manual INTEGER")
+        log.info("Migração do banco: %d processo(s) em cooperação", atualizar_cooperacao(con))
     if versao < SCHEMA_VERSAO:
         meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
     semear_feriados(con)
@@ -430,6 +441,70 @@ def chave_marco(adv: dict) -> str:
 def vincular(con, numero: str, advogada_id: int, origem: str):
     con.execute("INSERT OR IGNORE INTO processo_advogada(numero, advogada_id, origem, criado_em) VALUES(?,?,?,?)",
                 (numero, advogada_id, origem, agora()))
+
+
+# --- processos em cooperação ------------------------------------------------
+# Processo em que consta um dos advogados de cooperação do config.json (de fora do escritório). A marcação
+# automática (processos.cooperacao) é refeita a cada sincronização; cooperacao_manual vale por cima dela.
+
+COOPERACAO_SQL = "COALESCE(cooperacao_manual, cooperacao, 0)"  # 1 = em cooperação (manual ou automática)
+
+
+def _oab(numero) -> str:
+    return cnj.so_digitos(str(numero or "")).lstrip("0")
+
+
+def _mesmo_nome(nome_api: str, nome_cadastrado: str) -> bool:
+    """Todas as palavras do nome cadastrado aparecem no nome da API, sem acento/maiúscula
+    ("Jessica Delmoni" casa com "JESSICA FERREIRA DELMONI")."""
+    alvo = normalizar(nome_cadastrado).split()
+    return bool(alvo) and set(alvo) <= set(normalizar(nome_api).split())
+
+
+def _casa_advogado(adv: dict, coop: dict) -> bool:
+    """Pela OAB quando os dois lados têm; senão, pelo nome."""
+    oab_api, oab_coop = _oab(adv.get("numero_oab")), _oab(coop["oab_numero"])
+    if oab_api and oab_coop:
+        uf_api = str(adv.get("uf_oab") or "").strip().upper()
+        return oab_api == oab_coop and (not uf_api or not coop["oab_uf"] or uf_api == coop["oab_uf"])
+    return bool(coop["nome"]) and _mesmo_nome(adv.get("nome") or "", coop["nome"])
+
+
+def cooperacao_de(con, numero: str, lista: list[dict]) -> dict | None:
+    """O advogado de cooperação que consta no processo (advogados das publicações do DJEN ou partes), ou None."""
+    if not lista:
+        return None
+    for r in con.execute("SELECT advogados FROM comunicacoes WHERE numero=?", (numero,)):
+        for adv in json.loads(r["advogados"] or "[]"):
+            achado = next((c for c in lista if isinstance(adv, dict) and _casa_advogado(adv, c)), None)
+            if achado:
+                return achado
+    p = con.execute("SELECT partes FROM processos WHERE numero=?", (numero,)).fetchone()
+    nomes = [n for ns in json.loads(p["partes"]).values() for n in ns] if p and p["partes"] else []
+    return next((c for c in lista if c["nome"] and any(_mesmo_nome(n, c["nome"]) for n in nomes)), None)
+
+
+def atualizar_cooperacao(con, numero: str | None = None, lista: list[dict] | None = None) -> int:
+    """Refaz a marcação automática de um processo (ou de todos). Retorna quantos ficaram marcados."""
+    if lista is None:
+        lista = config.carregar(com_env=False)["advogados_cooperacao"]
+    numeros = [numero] if numero else [r[0] for r in con.execute("SELECT numero FROM processos")]
+    marcados = 0
+    for n in numeros:
+        sim = cooperacao_de(con, n, lista) is not None
+        marcados += sim
+        con.execute("UPDATE processos SET cooperacao=? WHERE numero=?", (1 if sim else 0, n))
+    return marcados
+
+
+def marcar_cooperacao(con, numero: str, valor: bool | None) -> bool:
+    """Marcação à mão. Igual à automática (ou None) volta a seguir a automática."""
+    r = con.execute("SELECT cooperacao FROM processos WHERE numero=?", (numero,)).fetchone()
+    if not r:
+        return False
+    manual = None if valor is None or bool(valor) == bool(r["cooperacao"]) else (1 if valor else 0)
+    con.execute("UPDATE processos SET cooperacao_manual=? WHERE numero=?", (manual, numero))
+    return True
 
 
 # --- processos -------------------------------------------------------------
@@ -672,6 +747,7 @@ def recalcular_resumo(con, numero: str):
            orgao=?, classe=?, busca=? WHERE numero=?""",
         (ult_mov_data, ult_mov_texto, ult_pub_data, ult_pub_texto, ult_atividade, orgao, classe, busca, numero),
     )
+    atualizar_cooperacao(con, numero)
 
 
 # --- consultas para a interface --------------------------------------------
@@ -716,6 +792,8 @@ def _processo_dict(r: sqlite3.Row, donas: dict | None = None) -> dict:
     d["assuntos"] = json.loads(d["assuntos"]) if d.get("assuntos") else []
     d["instancias"] = json.loads(d["instancias"]) if d.get("instancias") else []
     d["novo"] = bool(d.get("novidade_em") and (not d.get("visto_em") or d["novidade_em"] > d["visto_em"]))
+    d["cooperacao_auto"] = bool(d.get("cooperacao"))
+    d["cooperacao"] = bool(d["cooperacao_auto"] if d.get("cooperacao_manual") is None else d["cooperacao_manual"])
     return d
 
 
@@ -744,6 +822,7 @@ def detalhe(con, numero: str) -> dict | None:
         })
     eventos.sort(key=lambda e: e["data"] or "", reverse=True)
     p["eventos"] = eventos
+    p["cooperacao_por"] = cooperacao_de(con, numero, config.carregar(com_env=False)["advogados_cooperacao"])
     return p
 
 

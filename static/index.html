@@ -106,6 +106,7 @@
     <div class="contagem">
       <span id="contagem">Carregando…</span>
       <button class="link" id="btn-vistos" type="button" hidden>Marcar todos como vistos</button>
+      <span class="coop-aviso" id="coop-aviso" hidden></span>
     </div>
 
     <table class="tabela">
@@ -295,6 +296,13 @@
       <div id="cfg-pessoas" class="cfg-pessoas"></div>
       <div class="linha-arquivo"><input type="text" id="cfg-pessoa-nova" class="campo" placeholder="Nome da pessoa" autocomplete="off">
         <button class="btn" type="button" id="cfg-pessoa-add">Adicionar</button></div>
+      <div class="rotulo">Processos em cooperação</div>
+      <label class="chk"><input type="checkbox" id="cfg-coop-ocultar"> Ocultar processos em cooperação</label>
+      <p class="ajuda">Processo em que consta um dos advogados abaixo (pela OAB; sem OAB na publicação, pelo nome) some dos
+        Andamentos, do Monitoramento, da Agenda e dos contadores. Nada é apagado: desligando, volta tudo. Dá para marcar
+        ou desmarcar um processo à mão no painel dele.</p>
+      <div id="cfg-coop"></div>
+      <button class="btn mini" type="button" id="cfg-coop-add">+ Adicionar advogado</button>
       <label class="rotulo" for="cfg-chave">Chave pública do DataJud</label>
       <input type="text" id="cfg-chave" class="campo largo" autocomplete="off" spellcheck="false" placeholder="cole aqui a chave (APIKey …)">
       <p class="ajuda" id="cfg-chave-status"></p>

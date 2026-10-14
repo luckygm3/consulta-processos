@@ -69,6 +69,13 @@ em tela estreita (celular) o menu vira uma gaveta aberta pelo **☰**.
   na tabela mostra quem atua em cada processo.
 - **NOVO** marca processos com publicação ou movimento capturado depois da última vez que você marcou como visto.
 - Clique num processo para ver a linha do tempo (publicações + movimentos) e o texto completo das publicações.
+- **Processos em cooperação**: processo em que consta um dos advogados de cooperação (⚙; já vem com Jessica Delmoni,
+  OAB 13043/AL). Casa pela OAB dos advogados das publicações; quando a publicação não traz OAB, pelo nome (sem
+  acento/maiúscula). A marcação é refeita a cada atualização e quando a lista muda. Com **Ocultar processos em
+  cooperação** ligado (padrão), eles somem dos Andamentos, dos contadores e do filtro por advogada, do Monitoramento e
+  da Agenda, mesmo que a Beatriz ou a Kazuza também atuem; ao lado da contagem, “X processos em cooperação ocultos ·
+  mostrar” liga/desliga na hora. Nada é apagado. No painel do processo, a caixa **Processo em cooperação** marca ou
+  desmarca à mão (vale por cima da detecção automática).
 
 ## Monitoramento (prazos)
 
@@ -220,6 +227,8 @@ Testes do cálculo e da detecção: `.venv\Scripts\python -m unittest discover -
 | `prazos_regra_publicacao` | `"djen"` (publicação = 1º dia útil após a disponibilização, padrão) ou `"disponibilizacao"` |
 | `prazos_dias_internos` | data interna sugerida: quantos dias úteis antes do prazo fatal (padrão 2) |
 | `prazos_contagem_padrao` | `"uteis"` (padrão) ou `"corridos"` |
+| `ocultar_cooperacao` | `true` (padrão) esconde os processos em cooperação; `false` mostra (também muda em ⚙) |
+| `advogados_cooperacao` | advogados de cooperação: `nome`, `oab_numero`, `oab_uf` (padrão: Jessica Delmoni, 13043/AL; edite em ⚙) |
 
 ## Limitações
 

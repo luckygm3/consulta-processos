@@ -237,6 +237,14 @@ select.campo { max-width: 320px; }
 .cfg-adv .cfg-adv-nome { flex: 1; }
 .cfg-adv .cfg-adv-cor { width: 42px; height: 42px; padding: 2px; border: 1px solid var(--borda-forte); border-radius: 8px; background: var(--cartao); }
 .cfg-adv .ajuda { margin: 0; white-space: nowrap; }
+.cfg-coop-linha { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.cfg-coop-linha .cfg-coop-nome { flex: 1; min-width: 0; }
+.cfg-coop-linha .cfg-coop-oab { width: 110px; }
+.cfg-coop-linha .cfg-coop-uf { width: 60px; text-transform: uppercase; }
+.cfg-coop-linha .ck-del { width: 24px; height: 24px; opacity: 1; flex: none; }
+#cfg-coop-add { margin-bottom: 6px; }
+.coop-aviso { margin-left: auto; color: var(--fraco); font-size: .85rem; }
+.pa-coop-ajuda { margin: 2px 0 0; font-size: .82rem; }
 .cfg-pessoas { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
 .cfg-pessoa {
   display: inline-flex; align-items: center; gap: 2px; padding: 1px 2px 1px 10px;

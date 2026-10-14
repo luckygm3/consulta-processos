@@ -333,7 +333,7 @@ async function abrirLancamento(l) {
 
   // listas de apoio: processos (para o select) e nomes de clientes já usados (CLIENTES e lançamentos)
   const [procs, quadroDados] = await Promise.all([
-    api("/api/processos").then((d) => d.processos).catch(() => []),
+    api("/api/processos?incluir_cooperacao=true").then((d) => d.processos).catch(() => []),
     api("/api/quadro").catch(() => ({ cards: [] })),
   ]);
   const sel = $("#lc-processo");

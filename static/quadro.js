@@ -241,7 +241,7 @@ async function abrirCard(c, coluna) {
   if (!c) $("#qc-titulo").focus();
   // processos já cadastrados (todos, sem os filtros da aba Processos) para escolher pelo número ou pela parte
   try {
-    const d = await api("/api/processos");
+    const d = await api("/api/processos?incluir_cooperacao=true");
     $("#qc-processos").innerHTML = d.processos.map((p) => `<option value="${esc(p.numero_fmt)}">${esc(partesTexto(p))}</option>`).join("");
   } catch (_) { /* sem a lista, ainda dá para digitar o número */ }
 }

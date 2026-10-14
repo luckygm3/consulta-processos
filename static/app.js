@@ -159,6 +159,7 @@ async function carregarProcessos() {
   estado.filtros = d.filtros;
   estado.advogadas = d.filtros.advogadas || [];
   estado.contadores = d.contadores || {};
+  estado.cooperacao = d.cooperacao || { ocultar: false, qtd: 0 };
   if (estado.advogada && !estado.advogadas.some((a) => String(a.id) === estado.advogada)) {
     escolherAdvogada(""); // advogada lembrada não existe mais no config.json
     return;
@@ -244,7 +245,7 @@ function renderTabela() {
   $("#linhas").innerHTML = lista.map((p) => `
     <tr data-num="${p.numero}" class="${p.novo ? "novo" : ""} ${p.numero === estado.aberto ? "ativa" : ""}">
       <td data-rotulo="Processo">
-        <div class="num"><span class="n">${esc(p.numero_fmt)}</span>${p.novo ? `<span class="selo">NOVO</span>` : ""}${p.origem === "manual" ? `<span class="selo manual">manual</span>` : ""}</div>
+        <div class="num"><span class="n">${esc(p.numero_fmt)}</span>${p.novo ? `<span class="selo">NOVO</span>` : ""}${p.origem === "manual" ? `<span class="selo manual">manual</span>` : ""}${p.cooperacao ? `<span class="selo manual" title="Processo em cooperação">cooperação</span>` : ""}</div>
         <div class="partes">${esc(partesTexto(p))}</div>
         ${estado.advogadas.length > 1 ? `<div class="etqs">${p.advogadas.map(advogadaPorId).filter(Boolean).map(etiquetaAdv).join("")}</div>` : ""}
         ${p.novo ? `<button class="link pequeno visto-btn" type="button" data-visto="${p.numero}">marcar como visto</button>` : ""}
@@ -260,6 +261,7 @@ function renderTabela() {
   const n = lista.length;
   $("#contagem").textContent = `${n} ${n === 1 ? "processo" : "processos"}` + (novos ? ` · ${novos} com novidades` : "");
   $("#btn-vistos").hidden = !novos;
+  avisoCooperacao();
 
   const vazio = $("#vazio");
   vazio.hidden = n > 0;
@@ -269,6 +271,53 @@ function renderTabela() {
       ? "Nenhum processo com esses filtros."
       : "Nenhum processo ainda. Clique em <strong>Atualizar tudo</strong> para buscar suas publicações no DJEN, ou em <strong>Adicionar processos</strong>.";
   }
+}
+
+// Aviso discreto ao lado da contagem: quantos processos em cooperação estão ocultos (ou na lista), com o atalho
+// para ligar/desligar a opção das Configurações
+function avisoCooperacao() {
+  const { ocultar, qtd } = estado.cooperacao || {};
+  const aviso = $("#coop-aviso");
+  aviso.hidden = !qtd;
+  if (!qtd) return;
+  aviso.innerHTML = ocultar
+    ? `${qtd} ${qtd === 1 ? "processo em cooperação oculto" : "processos em cooperação ocultos"} · <button class="link pequeno" type="button" data-coop="0">mostrar</button>`
+    : `${qtd} em cooperação na lista · <button class="link pequeno" type="button" data-coop="1">ocultar</button>`;
+}
+
+async function ocultarCooperacao(ocultar) {
+  try {
+    await api("/api/config", { method: "POST", body: JSON.stringify({ ocultar_cooperacao: ocultar }) });
+    toast(ocultar ? "Processos em cooperação ocultos." : "Processos em cooperação aparecendo de novo.");
+  } catch (e) {
+    toast("Erro: " + e.message);
+  }
+  carregarProcessos();
+  carregarAlertas();
+}
+
+async function marcarCooperacao(p, valor) {
+  try {
+    await api(`/api/processos/${p.numero}/cooperacao`, { method: "POST", body: JSON.stringify({ cooperacao: valor }) });
+  } catch (e) {
+    toast("Erro: " + e.message);
+    return;
+  }
+  toast(valor && estado.cooperacao?.ocultar ? "Marcado como cooperação: some da lista enquanto a opção estiver ligada."
+    : valor ? "Marcado como processo em cooperação." : "Desmarcado: não é processo em cooperação.");
+  carregarProcessos();
+  carregarAlertas();
+  abrirPainel(p.numero);
+}
+
+// Explica no painel de onde vem a marcação (à mão ou qual advogado de cooperação consta)
+function origemCooperacao(p) {
+  const quem = p.cooperacao_por;
+  const nome = quem ? esc(quem.nome || "advogado de cooperação") + (quem.oab_numero ? ` (OAB ${esc(quem.oab_numero)}${quem.oab_uf ? "/" + esc(quem.oab_uf) : ""})` : "") : "";
+  if (p.cooperacao_manual !== null && p.cooperacao_manual !== undefined) {
+    return p.cooperacao ? "marcado à mão" : `desmarcado à mão${nome ? ` · consta ${nome}` : ""}`;
+  }
+  return nome ? `consta ${nome}` : "";
 }
 
 async function marcarVisto(numero) {
@@ -347,6 +396,8 @@ function renderPainel(p) {
     ["Advogada(s)", p.advogadas.map(advogadaPorId).filter(Boolean).map((a) => `${etiquetaAdv(a)} ${esc(a.nome)}`).join("<br>")],
     ["Origem", p.origem === "manual" ? "Adicionado manualmente" : "Encontrado pelas publicações do DJEN"],
     ["DataJud consultado", fmtDataHora(p.datajud_em)],
+    ["Cooperação", `<label class="chk"><input type="checkbox" id="pa-coop" ${p.cooperacao ? "checked" : ""}> Processo em cooperação</label>
+      <div class="ajuda pa-coop-ajuda">${origemCooperacao(p)}</div>`],
     ["Contagem de prazos", `<select id="pa-contagem" class="campo mini">
       <option value="">padrão (dias úteis, ou o do tipo de ato)</option>
       <option value="uteis" ${p.contagem === "uteis" ? "selected" : ""}>sempre dias úteis</option>
@@ -386,6 +437,7 @@ function renderPainel(p) {
     toast("Contagem salva: vale para os próximos cálculos deste processo.");
   };
   $("#pa-remover").onclick = () => removerProcesso(p);
+  $("#pa-coop").onchange = (ev) => marcarCooperacao(p, ev.target.checked);
   $("#p-corpo").querySelectorAll("[data-aba]").forEach((b) => {
     b.onclick = () => {
       estado.aba = b.dataset.aba;
@@ -592,9 +644,23 @@ async function abrirConfig() {
     ? `Chave configurada (termina em …${c.chave_final}). Cole uma nova só se quiser substituir.`
     : "Nenhuma chave configurada ainda.";
   $("#cfg-dias").value = c.backfill_dias;
+  $("#cfg-coop-ocultar").checked = !!c.ocultar_cooperacao;
+  $("#cfg-coop").innerHTML = "";
+  (c.advogados_cooperacao || []).forEach(linhaCooperacao);
   await carregarPessoas();
   renderEquipe();
   $("#dlg-config").showModal();
+}
+
+// Uma linha da lista de advogados de cooperação (nome + OAB + UF)
+function linhaCooperacao(a = {}) {
+  $("#cfg-coop").insertAdjacentHTML("beforeend", `
+    <div class="cfg-coop-linha">
+      <input type="text" class="campo cfg-coop-nome" value="${esc(a.nome || "")}" placeholder="Nome" aria-label="Nome do advogado">
+      <input type="text" class="campo cfg-coop-oab" value="${esc(a.oab_numero || "")}" placeholder="OAB" aria-label="Número da OAB">
+      <input type="text" class="campo cfg-coop-uf" value="${esc(a.oab_uf || "")}" placeholder="UF" maxlength="2" aria-label="UF da OAB">
+      <button type="button" class="ck-del" data-coop-remover title="Tirar da lista" aria-label="Tirar da lista">×</button>
+    </div>`);
 }
 
 function renderEquipe() {
@@ -622,12 +688,18 @@ async function salvarConfig() {
     oab_numero: d.dataset.oab, oab_uf: d.dataset.uf,
     nome: d.querySelector(".cfg-adv-nome").value.trim(), cor: d.querySelector(".cfg-adv-cor").value,
   }));
+  corpo.ocultar_cooperacao = $("#cfg-coop-ocultar").checked;
+  corpo.advogados_cooperacao = [...document.querySelectorAll(".cfg-coop-linha")].map((d) => ({
+    nome: d.querySelector(".cfg-coop-nome").value.trim(), oab_numero: d.querySelector(".cfg-coop-oab").value.trim(),
+    oab_uf: d.querySelector(".cfg-coop-uf").value.trim(),
+  })).filter((a) => a.nome || a.oab_numero);
   try {
     await api("/api/config", { method: "POST", body: JSON.stringify(corpo) });
     $("#dlg-config").close();
     toast(chave ? "Chave salva. Clique em “Atualizar tudo” para buscar as movimentações." : "Configurações salvas.");
     carregarEstado();
     carregarProcessos();
+    carregarAlertas();
   } catch (e) {
     toast("Erro ao salvar: " + e.message);
   }
@@ -674,6 +746,9 @@ function ligarEventos() {
   $("#add-enviar").onclick = enviarAdicionar;
   $("#add-arquivo").onchange = lerArquivo;
   $("#cfg-salvar").onclick = salvarConfig;
+  $("#cfg-coop-add").onclick = () => { linhaCooperacao(); $("#cfg-coop .cfg-coop-linha:last-child .cfg-coop-nome").focus(); };
+  $("#cfg-coop").onclick = (ev) => { if (ev.target.closest("[data-coop-remover]")) ev.target.closest(".cfg-coop-linha").remove(); };
+  $("#coop-aviso").onclick = (ev) => { const b = ev.target.closest("[data-coop]"); if (b) ocultarCooperacao(b.dataset.coop === "1"); };
   const addPessoa = () => {
     const nome = $("#cfg-pessoa-nova").value.trim();
     if (!nome) return;

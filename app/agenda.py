@@ -85,9 +85,15 @@ _SELECT = """SELECT t.*, p.tribunal AS p_tribunal, p.orgao AS p_orgao, p.partes 
              LEFT JOIN comunicacoes c ON c.hash=t.comunicacao_hash"""
 
 
-def listar(con, hoje: date | None = None) -> list[dict]:
+def listar(con, hoje: date | None = None, ocultar_cooperacao: bool | None = None) -> list[dict]:
+    """Tarefas abertas e concluídas. Com "ocultar processos em cooperação" ligado (padrão: o do config.json), as
+    tarefas desses processos ficam de fora (Monitoramento, Agenda e alertas)."""
     cals, hoje = Calendarios(con), hoje or date.today()
-    rows = con.execute(_SELECT + " WHERE t.status != 'descartado' ORDER BY t.prazo_fatal IS NULL, t.prazo_fatal, t.id")
+    if ocultar_cooperacao is None:
+        ocultar_cooperacao = config.carregar(com_env=False)["ocultar_cooperacao"]
+    filtro = " AND COALESCE(p.cooperacao_manual, p.cooperacao, 0) = 0" if ocultar_cooperacao else ""
+    rows = con.execute(_SELECT + f" WHERE t.status != 'descartado'{filtro}"
+                       " ORDER BY t.prazo_fatal IS NULL, t.prazo_fatal, t.id")
     return [_tarefa_dict(r, cals, hoje) for r in rows]
 
 
