@@ -1,4 +1,4 @@
-"""Rotas do financeiro (lançamentos, parcelas e painel)."""
+"""Rotas do financeiro (lançamentos, parcelas, pagamentos e painel)."""
 from datetime import date
 
 from fastapi import APIRouter, Body, HTTPException
@@ -30,9 +30,11 @@ def painel(mes: str = ""):
 
 @rotas.get("/atrasadas")
 def atrasadas():
-    """Só a contagem (selo do menu lateral)."""
+    """Só a contagem (selo do menu lateral). Inadimplentes ficam de fora (têm bloco próprio no painel)."""
     with db.conexao() as con:
-        n = con.execute("SELECT COUNT(*) FROM parcelas WHERE pago=0 AND vencimento < ?", (date.today().isoformat(),)).fetchone()[0]
+        n = con.execute("""SELECT COUNT(*) FROM parcelas p JOIN lancamentos l ON l.id = p.lancamento_id
+                           WHERE p.pago=0 AND p.vencimento < ? AND l.inadimplente=0""",
+                        (date.today().isoformat(),)).fetchone()[0]
     return {"atrasadas": n}
 
 
@@ -57,8 +59,30 @@ def excluir(lid: int):
 
 @rotas.post("/parcelas/{pid}/pagar")
 def pagar(pid: int, dados: dict = Body(...)):
-    """{"pago": true|false, "pago_em": "AAAA-MM-DD" (opcional; padrão hoje)}"""
+    """Atalho da caixinha: {"pago": true} lança o que falta (em "pago_em", AAAA-MM-DD, ou hoje); false apaga os
+    pagamentos da parcela."""
     with db.conexao() as con:
         if not _ou_400(financeiro.marcar_paga, con, pid, bool(dados.get("pago")), dados.get("pago_em")):
             raise HTTPException(404, "Parcela não encontrada")
+    return {"ok": True}
+
+
+@rotas.post("/parcelas/{pid}/pagamentos")
+def novo_pagamento(pid: int, dados: dict = Body(...)):
+    """Pagamento parcial (ou não) de uma parcela: {"valor": centavos, "data": "AAAA-MM-DD"}."""
+    with db.conexao() as con:
+        return {"id": _ou_400(financeiro.adicionar_pagamento, con, pid, dados)}
+
+
+@rotas.put("/pagamentos/{gid}")
+def editar_pagamento(gid: int, dados: dict = Body(...)):
+    with db.conexao() as con:
+        _ou_400(financeiro.editar_pagamento, con, gid, dados)
+    return {"ok": True}
+
+
+@rotas.delete("/pagamentos/{gid}")
+def excluir_pagamento(gid: int):
+    with db.conexao() as con:
+        _ou_400(financeiro.excluir_pagamento, con, gid)
     return {"ok": True}

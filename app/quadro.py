@@ -1,4 +1,4 @@
-"""Quadro de clientes (aba com nome provisório, definido em static/quadro.js): 5 colunas que ela nomeia, cards de
+"""Quadro de clientes (aba CLIENTES; o nome fica em static/quadro.js): 5 colunas que ela nomeia, cards de
 cliente criados à mão, com a checklist padrão, ligados a um processo ou marcados como petição inicial (o processo
 ainda não existe) ou preventivo/consultoria."""
 import calendar
@@ -6,7 +6,7 @@ import json
 import re
 from datetime import date
 
-from . import agenda, checklist, cnj, db, prazos
+from . import agenda, checklist, cnj, db, financeiro, prazos
 
 TIPOS = {"processo": "Com processo", "inicial": "Petição inicial", "preventivo": "Preventivo / consultoria"}
 MODELO = {"processo": "processo", "inicial": "processo", "preventivo": "preventivo"}  # tipo -> checklist padrão
@@ -34,6 +34,7 @@ def carregar(con, hoje: date | None = None) -> dict:
     hoje = hoje or date.today()
     cals = agenda.Calendarios(con)
     processuais = prazos_processuais(con, hoje)
+    inadimplentes = financeiro.clientes_inadimplentes(con)  # selo no card: mesmo nome de um lançamento inadimplente
     colunas = [dict(r) for r in con.execute("SELECT id, posicao, nome FROM quadro_colunas ORDER BY posicao")]
     cards = []
     for r in con.execute("""SELECT q.*, p.partes AS p_partes, p.numero AS p_numero, p.tribunal AS p_tribunal,
@@ -47,6 +48,7 @@ def carregar(con, hoje: date | None = None) -> dict:
         d["partes"] = db.resumo_partes(d.pop("p_partes"))
         d["cadastrado"] = d.pop("p_numero") is not None  # o painel do processo só abre se ele está na lista
         d["advogadas_processo"] = [int(x) for x in (d.pop("p_advs") or "").split(",") if x]
+        d["inadimplente"] = financeiro.chave_cliente(d["titulo"]) in inadimplentes
         if d["tipo"] == "processo":
             prazo = dict(processuais[d["numero"]]) if d["numero"] in processuais else None
         elif d["prazo_data"]:

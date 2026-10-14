@@ -729,7 +729,7 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .fin-card.destaque .fin-card-valor { color: var(--primaria); }
 .fin-card.alerta .fin-card-valor { color: var(--erro); }
 .fin-card.alerta { border-color: #f1b4ad; background: linear-gradient(180deg, var(--erro-fundo), var(--cartao) 70%); }
-.fin-colunas { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.fin-colunas { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .fin-bloco {
   background: var(--cartao); border: 1px solid var(--borda); border-radius: var(--raio); box-shadow: var(--sombra);
   padding: 12px 14px; min-width: 0;
@@ -751,10 +751,10 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .fin-barra .campo { flex: 1 1 220px; min-width: 180px; max-width: 360px; }
 .fin-rolagem { max-height: none; }
 .fin-tabela { font-size: .92rem; }
-.fin-tabela th.num, .fin-tabela td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fin-tabela th.num, .fin-tabela td.num { display: table-cell; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fin-tabela td:last-child { white-space: nowrap; overflow-wrap: normal; }
 .fin-tabela td { vertical-align: middle; }
 .fin-tabela tfoot td { border-top: 1px solid var(--borda); color: var(--suave); padding-top: 8px; }
-.fin-tabela .campo.fin-pago-em { width: 150px; min-height: 32px; }
 .fin-tabela input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--u-folgado); }
 .ft-cli { font-weight: 600; display: block; }
 .ft-proc { color: var(--fraco); font-size: .8rem; font-variant-numeric: tabular-nums; }
@@ -763,6 +763,29 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .sit-paga { color: var(--u-folgado); background: var(--u-folgado-fundo); }
 .sit-pendente { color: var(--suave); background: #f0f2f5; }
 .sit-atrasada { color: var(--u-vencido); background: var(--u-vencido-fundo); }
+.sit-parcial { color: var(--u-ate5); background: var(--u-ate5-fundo); }
+.selo-inad { white-space: nowrap; background: #f7f2f2; color: #8f3b3b; border-color: #e6cfcf; letter-spacing: .02em; font-weight: 650; }
+
+/* pagamentos de uma parcela: resumo, histórico, "+" e o mini-formulário */
+.pg-cel { min-width: 170px; overflow-wrap: normal; }
+.pg-resumo { font-size: .82rem; color: var(--suave); overflow-wrap: normal; }
+.pg-resumo b { color: var(--texto); }
+.pg-lista { list-style: none; margin: 0; padding: 0; font-size: .82rem; color: var(--suave); font-variant-numeric: tabular-nums; }
+.pg-lista li { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+.pg-acao { border: 0; background: none; padding: 0 4px; border-radius: 4px; cursor: pointer; color: var(--fraco); font-size: .8rem; line-height: 1.5; }
+.pg-acao:hover, .pg-acao:focus-visible { color: var(--primaria); background: var(--primaria-clara); }
+.pg-acao[data-pg-excluir]:hover, .pg-acao[data-pg-excluir]:focus-visible { color: var(--erro); background: var(--erro-fundo); }
+.pg-mais {
+  width: 24px; height: 24px; margin-top: 2px; padding: 0; border: 1px dashed var(--borda-forte); border-radius: 6px;
+  background: var(--cartao); color: var(--primaria); font-weight: 700; font-size: 1rem; line-height: 1; cursor: pointer;
+}
+.pg-mais:hover, .pg-mais:focus-visible { border-style: solid; border-color: var(--primaria); background: var(--primaria-clara); }
+.pg-form-linha td { background: #f7f9fc; }
+.pg-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; }
+.pg-form strong { align-self: center; font-size: .9rem; }
+.pg-form label { display: flex; flex-direction: column; gap: 2px; font-size: .8rem; color: var(--suave); }
+.pg-form .pg-valor { width: 130px; font-variant-numeric: tabular-nums; }
+.pg-dica { align-self: center; color: var(--fraco); font-size: .8rem; }
 .fin-progresso { display: block; width: 120px; max-width: 100%; height: 5px; margin-top: 4px; border-radius: 99px; background: #e8ebf0; overflow: hidden; }
 .fin-progresso span { display: block; height: 100%; background: var(--u-folgado); }
 
@@ -781,6 +804,8 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .lc-tabela input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--u-folgado); }
 .lc-tabela tr.s-paga td:first-child { color: var(--u-folgado); font-weight: 600; }
 .lc-saldo { margin-top: 8px; color: var(--suave); font-size: .92rem; }
+.lc-inad { margin-top: 14px; }
+.lc-inad-ajuda { margin: 2px 0 10px 28px; font-size: .82rem; }
 
 @media (max-width: 900px) {
   .fin-colunas { grid-template-columns: 1fr; }

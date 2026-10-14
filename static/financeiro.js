@@ -1,13 +1,16 @@
 "use strict";
-// Financeiro: painel (cards de resumo, inadimplentes, próximas parcelas), tabela de parcelas filtrável, visão por
-// cliente e o formulário de lançamento (entrada + parcelas mensais editáveis). Valores sempre em centavos.
+// Financeiro: painel (cards de resumo, em atraso, inadimplentes, próximas parcelas), tabela de parcelas filtrável
+// (com pagamentos parciais), visão por cliente e o formulário de lançamento (entrada + parcelas mensais editáveis).
+// Valores sempre em centavos.
 // Usa app.js (api, esc, toast, reais, lerReais, dataBrCompleta, partesTexto…) e agenda.js (MESES, TELAS…).
 
 const fin = {
   mes: isoLocal(new Date()).slice(0, 7), dados: null, aba: lerPreferencia("fin-aba") === "clientes" ? "clientes" : "parcelas",
   filtro: "todas", editando: null, linhas: [], editadas: false,
+  pg: null, // mini-formulário de pagamento aberto: { onde: "tabela" | "form", chave: id da parcela | linha, pag: índice | null }
 };
 const SITUACAO = { paga: "Paga", pendente: "A vencer", atrasada: "Atrasada" };
+const SELO_INAD = `<span class="selo selo-inad" title="Cliente inadimplente: fora da renda do mês">inadimplente</span>`;
 
 const mesTexto = (aaaamm) => {
   const nome = MESES[Number(aaaamm.slice(5, 7)) - 1];
@@ -28,6 +31,119 @@ function quandoVence(iso) {
   return dias === 0 ? "hoje" : dias === 1 ? "amanhã" : `em ${dias} dias`;
 }
 
+// ---------- pagamentos de uma parcela (na tabela de parcelas e no formulário do lançamento) ----------
+// Cada parcela tem um histórico (p.pagamentos: [{id?, valor, data}]): pendente (nada pago), parcial ou paga (pago >= valor)
+const pagoDe = (p) => (p.pagamentos || []).reduce((s, g) => s + g.valor, 0);
+const faltaDe = (p) => Math.max(0, p.valor - pagoDe(p));
+function statusDe(p) {
+  const pago = pagoDe(p);
+  return pago > 0 && pago >= p.valor ? "paga" : pago > 0 ? "parcial" : "pendente";
+}
+
+function situacaoHTML(p) {
+  const atraso = p.situacao === "atrasada" ? ` · ${p.dias_atraso} dia(s)` : "";
+  if (statusDe(p) === "parcial") return `<span class="sit ${atraso ? "sit-atrasada" : "sit-parcial"}">Parcial${atraso}</span>`;
+  return `<span class="sit sit-${p.situacao}">${SITUACAO[p.situacao]}${atraso}</span>`;
+}
+
+// Resumo (só na parcial), histórico (cada pagamento com editar/excluir) e o "+" (enquanto falta alguma coisa)
+function pagamentosHTML(p) {
+  const st = statusDe(p);
+  const lista = (p.pagamentos || []).map((g, i) => `
+    <li data-pag="${i}">${dataBrCompleta(g.data)} · ${reais(g.valor)}
+      <button type="button" class="pg-acao" data-pg-editar title="Editar pagamento" aria-label="Editar pagamento de ${reais(g.valor)}">✎</button>
+      <button type="button" class="pg-acao" data-pg-excluir title="Excluir pagamento" aria-label="Excluir pagamento de ${reais(g.valor)}">✕</button>
+    </li>`).join("");
+  return `${st === "parcial" ? `<div class="pg-resumo">pago ${reais(pagoDe(p))} de ${reais(p.valor)} — <b>falta ${reais(faltaDe(p))}</b></div>` : ""}
+    ${lista ? `<ul class="pg-lista">${lista}</ul>` : ""}
+    ${st !== "paga" ? `<button type="button" class="pg-mais" data-pg-novo title="Adicionar pagamento parcial" aria-label="Adicionar pagamento parcial">+</button>` : ""}`;
+}
+
+// Mini-formulário (valor pago e data) numa linha logo abaixo da parcela
+function pgFormHTML(p, colunas) {
+  const g = fin.pg.pag !== null ? p.pagamentos[fin.pg.pag] : null;
+  const dica = fin.pg.onde === "form" ? "grava ao salvar o lançamento" : g ? "" : `falta ${reais(faltaDe(p))} de ${reais(p.valor)}`;
+  return `<tr class="pg-form-linha"><td colspan="${colunas}"><div class="pg-form" data-pg-form>
+    <strong>${g ? "Editar pagamento" : "Pagamento parcial"}</strong>
+    <label>Valor pago <input type="text" class="campo mini pg-valor" inputmode="decimal" autocomplete="off" value="${reais(g ? g.valor : faltaDe(p))}"></label>
+    <label>Data do pagamento <input type="date" class="campo mini pg-data" value="${g ? g.data : isoLocal(new Date())}"></label>
+    <button type="button" class="btn mini primario" data-pg-salvar>Salvar</button>
+    <button type="button" class="btn mini" data-pg-cancelar>Cancelar</button>
+    ${dica ? `<span class="pg-dica">${dica}</span>` : ""}
+  </div></td></tr>`;
+}
+
+function abrirPgForm(onde, chave, pag = null) {
+  fin.pg = { onde, chave, pag };
+  if (onde === "tabela") renderParcelas();
+  else renderLinhas();
+  const v = document.querySelector("[data-pg-form] .pg-valor");
+  if (v) { v.focus(); v.select(); }
+}
+
+function fecharPgForm() {
+  const onde = fin.pg?.onde;
+  fin.pg = null;
+  if (onde === "tabela") renderParcelas();
+  else if (onde === "form") renderLinhas();
+}
+
+// Lê o mini-formulário; null se faltar algo. Passar do valor da parcela pede confirmação.
+function lerPgForm(p) {
+  const caixa = document.querySelector("[data-pg-form]");
+  const valor = lerReais(caixa.querySelector(".pg-valor").value), data = caixa.querySelector(".pg-data").value;
+  if (!valor || valor < 0) { caixa.querySelector(".pg-valor").focus(); toast("Informe o valor pago (ex.: 300,00)."); return null; }
+  if (!data) { caixa.querySelector(".pg-data").focus(); toast("Informe a data do pagamento."); return null; }
+  const outros = pagoDe(p) - (fin.pg.pag !== null ? p.pagamentos[fin.pg.pag].valor : 0);
+  if (outros + valor > p.valor && !confirm(`Com esse valor, o pago (${reais(outros + valor)}) passa do valor da parcela (${reais(p.valor)}).\nLançar assim mesmo?`)) return null;
+  return { valor, data };
+}
+
+const parcelaPorId = (id) => fin.dados?.lancamentos.flatMap((l) => l.parcelas).find((p) => p.id === id);
+
+// Na tabela, cada ação grava na hora
+async function salvarPgTabela() {
+  const p = parcelaPorId(fin.pg.chave);
+  const d = p && lerPgForm(p);
+  if (!d) return;
+  const g = fin.pg.pag !== null ? p.pagamentos[fin.pg.pag] : null;
+  try {
+    if (g) await api(`/api/financeiro/pagamentos/${g.id}`, { method: "PUT", body: JSON.stringify(d) });
+    else await api(`/api/financeiro/parcelas/${p.id}/pagamentos`, { method: "POST", body: JSON.stringify(d) });
+  } catch (e) {
+    toast("Erro: " + e.message);
+    return;
+  }
+  const falta = p.valor - pagoDe(p) + (g ? g.valor : 0) - d.valor;
+  fin.pg = null;
+  toast(g ? "Pagamento alterado." : falta > 0 ? `Pagamento lançado: falta ${reais(falta)}.` : "Pagamento lançado: parcela quitada.");
+  recarregarTela();
+}
+
+async function excluirPgTabela(p, i) {
+  const g = p.pagamentos[i];
+  if (!confirm(`Excluir o pagamento de ${reais(g.valor)} de ${dataBrCompleta(g.data)}?`)) return;
+  fin.pg = null;
+  try {
+    await api(`/api/financeiro/pagamentos/${g.id}`, { method: "DELETE" });
+    toast("Pagamento excluído.");
+  } catch (e) {
+    toast("Erro: " + e.message);
+  }
+  recarregarTela();
+}
+
+// No formulário do lançamento, mexe só na memória (grava junto com o lançamento)
+function salvarPgForm() {
+  const p = fin.linhas[fin.pg.chave];
+  const d = p && lerPgForm(p);
+  if (!d) return;
+  if (fin.pg.pag !== null) p.pagamentos[fin.pg.pag] = d;
+  else p.pagamentos.push(d);
+  p.pagamentos.sort((a, b) => a.data.localeCompare(b.data));
+  fecharPgForm();
+}
+
 // ---------- carregar e painel ----------
 async function carregarFinanceiro() {
   fin.dados = await api(`/api/financeiro?mes=${fin.mes}`);
@@ -43,29 +159,41 @@ function renderFinanceiro() {
   const card = (titulo, valor, sub, classe = "") =>
     `<div class="fin-card ${classe}"><div class="fin-card-tit">${titulo}</div><div class="fin-card-valor">${valor}</div><div class="fin-card-sub">${sub}</div></div>`;
   const qtdLanc = d.lancamentos.filter((l) => l.falta > 0).length;
+  const ar = r.a_receber_mes, inad = r.inadimplentes;
+  // parcela parcial conta pelo que falta; inadimplente fica fora da renda do mês (mostra quanto ficou de fora)
+  const subMes = [ar.previsto ? `${ar.qtd_pendente} parcela(s) em aberto · ${reais(ar.pago)} já pago de ${reais(ar.previsto)}` : "nada vence neste mês",
+    ar.inadimplentes ? `${reais(ar.inadimplentes)} de inadimplentes fora da conta` : ""].filter(Boolean).join(" · ");
   $("#fin-cards").innerHTML = [
-    card(`A receber em ${mes}`, reais(r.a_receber_mes.pendente),
-      r.a_receber_mes.previsto ? `${r.a_receber_mes.qtd_pendente} parcela(s) em aberto · ${reais(r.a_receber_mes.pago)} já pago de ${reais(r.a_receber_mes.previsto)}` : "nada vence neste mês", "destaque"),
-    card(`Recebido em ${mes}`, reais(r.recebido_mes), "pela data do pagamento"),
+    card(`A receber em ${mes}`, reais(ar.pendente), subMes, "destaque"),
+    card(`Recebido em ${mes}`, reais(r.recebido_mes), "pela data de cada pagamento"),
     card(`Recebido em ${fin.mes.slice(0, 4)}`, reais(r.recebido_ano), "no ano todo"),
     card("Total a receber", reais(r.total_a_receber), qtdLanc ? `em ${qtdLanc} lançamento(s)` : "nada em aberto"),
     card("Em atraso", reais(r.em_atraso.valor),
-      r.em_atraso.parcelas ? `${r.em_atraso.parcelas} parcela(s) · ${r.em_atraso.clientes} cliente(s)` : "ninguém em atraso",
+      (r.em_atraso.parcelas ? `${r.em_atraso.parcelas} parcela(s) · ${r.em_atraso.clientes} cliente(s)` : "ninguém em atraso")
+        + (inad.valor ? " · inadimplentes à parte" : ""),
       r.em_atraso.valor ? "alerta" : ""),
   ].join("");
 
-  $("#fin-inad").innerHTML = r.inadimplentes.map((g) => `
+  $("#fin-atraso").innerHTML = r.atrasados.map((g) => `
     <button type="button" class="fin-linha" data-lanc="${g.lancamentos[0]}">
       <span class="fl-nome">${esc(g.cliente)}</span>
       <span class="fl-valor ruim">${reais(g.valor)}</span>
       <span class="fl-det">${g.parcelas} parcela(s) · <b>${g.dias_atraso} dia(s) de atraso</b> · desde ${dataBrCompleta(g.desde)}</span>
     </button>`).join("") || `<p class="nada">Ninguém em atraso.</p>`;
 
+  $("#fin-inad-sub").textContent = inad.clientes ? `${reais(inad.valor)} em atraso · fora da renda do mês` : "fora da renda do mês";
+  $("#fin-inad").innerHTML = inad.lista.map((g) => `
+    <button type="button" class="fin-linha" data-lanc="${g.lancamentos[0]}">
+      <span class="fl-nome">${esc(g.cliente)}</span>
+      <span class="fl-valor ${g.valor ? "ruim" : ""}">${reais(g.valor)}</span>
+      <span class="fl-det">${g.parcelas ? `${g.parcelas} parcela(s) em atraso · <b>${g.dias_atraso} dia(s)</b> · desde ${dataBrCompleta(g.desde)}` : "nada vencido"}</span>
+    </button>`).join("") || `<p class="nada">Nenhum cliente marcado. A marcação fica no lançamento.</p>`;
+
   $("#fin-proximas").innerHTML = r.proximas.map((p) => `
     <button type="button" class="fin-linha" data-lanc="${p.lancamento_id}">
       <span class="fl-nome">${esc(p.cliente)} <small>${p.numero === 0 ? "entrada" : esc(p.rotulo)}</small></span>
-      <span class="fl-valor">${reais(p.valor)}</span>
-      <span class="fl-det">${dataBrCompleta(p.vencimento)} · ${quandoVence(p.vencimento)}</span>
+      <span class="fl-valor">${reais(p.falta)}</span>
+      <span class="fl-det">${p.inadimplente ? SELO_INAD + " " : ""}${dataBrCompleta(p.vencimento)} · ${quandoVence(p.vencimento)}${p.status === "parcial" ? ` · pago ${reais(p.pago_valor)} de ${reais(p.valor)}` : ""}</span>
     </button>`).join("") || `<p class="nada">Nenhuma parcela a vencer.</p>`;
 
   document.querySelectorAll("#fin-aba [data-aba]").forEach((b) => b.classList.toggle("ativa", b.dataset.aba === fin.aba));
@@ -98,28 +226,38 @@ function renderParcelas() {
       ? "Nenhuma parcela com esses filtros." : "Nenhum lançamento ainda. Clique em <strong>+ Novo lançamento</strong>."}</p>`;
     return;
   }
-  const total = linhas.reduce((s, p) => s + p.valor, 0);
+  const total = linhas.reduce((s, p) => s + p.valor, 0), falta = linhas.reduce((s, p) => s + p.falta, 0);
   $("#fin-tabela").innerHTML = `
     <div class="tabela-rolagem fin-rolagem"><table class="tabela compacta fin-tabela">
-      <thead><tr><th>Paga</th><th>Vencimento</th><th>Cliente</th><th>Parcela</th><th class="num">Valor</th><th>Situação</th><th>Pago em</th><th></th></tr></thead>
+      <thead><tr><th>Paga</th><th>Vencimento</th><th>Cliente</th><th>Parcela</th><th class="num">Valor</th><th>Situação</th><th>Pagamentos</th><th></th></tr></thead>
       <tbody>${linhas.map((p) => `
         <tr class="s-${p.situacao}" data-parcela="${p.id}">
-          <td><input type="checkbox" class="fin-paga" ${p.pago ? "checked" : ""} aria-label="Paga: ${esc(p.l.cliente)} ${esc(p.rotulo)}"></td>
+          <td><input type="checkbox" class="fin-paga" ${p.pago ? "checked" : ""} ${p.status === "parcial" ? "data-parcial" : ""}
+            title="${p.pago ? "Desmarcar apaga os pagamentos" : "Marcar lança o que falta, com a data de hoje"}" aria-label="Paga: ${esc(p.l.cliente)} ${esc(p.rotulo)}"></td>
           <td>${dataBrCompleta(p.vencimento)}</td>
-          <td><span class="ft-cli">${esc(p.l.cliente)}</span>${p.l.numero_fmt ? `<small class="ft-proc">${esc(p.l.numero_fmt)}</small>` : ""}</td>
+          <td><span class="ft-cli">${esc(p.l.cliente)}${p.l.inadimplente ? " " + SELO_INAD : ""}</span>${p.l.numero_fmt ? `<small class="ft-proc">${esc(p.l.numero_fmt)}</small>` : ""}</td>
           <td>${p.numero === 0 ? "Entrada" : esc(p.rotulo)}</td>
           <td class="num">${reais(p.valor)}</td>
-          <td><span class="sit sit-${p.situacao}">${SITUACAO[p.situacao]}${p.situacao === "atrasada" ? ` · ${p.dias_atraso} dia(s)` : ""}</span></td>
-          <td>${p.pago ? `<input type="date" class="campo fin-pago-em" value="${p.pago_em || ""}" aria-label="Data do pagamento">` : ""}</td>
+          <td>${situacaoHTML(p)}</td>
+          <td class="pg-cel">${pagamentosHTML(p)}</td>
           <td><button class="link pequeno" type="button" data-lanc="${p.lancamento_id}">abrir</button></td>
-        </tr>`).join("")}</tbody>
-      <tfoot><tr><td colspan="4">${linhas.length} parcela(s)</td><td class="num"><b>${reais(total)}</b></td><td colspan="3"></td></tr></tfoot>
+        </tr>${fin.pg?.onde === "tabela" && fin.pg.chave === p.id ? pgFormHTML(p, 8) : ""}`).join("")}</tbody>
+      <tfoot><tr><td colspan="4">${linhas.length} parcela(s)</td><td class="num"><b>${reais(total)}</b></td>
+        <td colspan="3">${falta !== total ? `falta <b>${reais(falta)}</b>` : ""}</td></tr></tfoot>
     </table></div>`;
+  document.querySelectorAll("#fin-tabela .fin-paga[data-parcial]").forEach((c) => { c.indeterminate = true; });
 }
 
-async function marcarPaga(id, pago, pagoEm) {
+// Caixinha "paga": marcar lança o que falta com a data de hoje; desmarcar apaga os pagamentos da parcela
+async function marcarPaga(id, pago) {
+  const p = parcelaPorId(id);
+  if (!pago && p && p.pagamentos.length > 1
+    && !confirm(`Apagar os ${p.pagamentos.length} pagamentos desta parcela (${reais(p.pago_valor)})?`)) {
+    renderParcelas();
+    return;
+  }
   try {
-    await api(`/api/financeiro/parcelas/${id}/pagar`, { method: "POST", body: JSON.stringify({ pago, pago_em: pagoEm || null }) });
+    await api(`/api/financeiro/parcelas/${id}/pagar`, { method: "POST", body: JSON.stringify({ pago }) });
   } catch (e) {
     toast("Erro: " + e.message);
   }
@@ -131,8 +269,9 @@ function renderPorCliente() {
   const grupos = new Map();
   for (const l of fin.dados.lancamentos.filter(casaBusca)) {
     const k = chaveCliente(l.cliente);
-    if (!grupos.has(k)) grupos.set(k, { cliente: l.cliente, total: 0, recebido: 0, falta: 0, atrasado: 0, proximo: null, lancs: [] });
+    if (!grupos.has(k)) grupos.set(k, { cliente: l.cliente, total: 0, recebido: 0, falta: 0, atrasado: 0, proximo: null, lancs: [], inad: false });
     const g = grupos.get(k);
+    g.inad ||= l.inadimplente;
     g.total += l.valor_total;
     g.recebido += l.recebido;
     g.falta += l.falta;
@@ -153,7 +292,7 @@ function renderPorCliente() {
       <tbody>${lista.map((g) => {
         const pct = g.total ? Math.min(100, Math.round((100 * g.recebido) / g.total)) : 0;
         return `<tr>
-          <td><span class="ft-cli">${esc(g.cliente)}</span><span class="fin-progresso" title="${pct}% recebido"><span style="width:${pct}%"></span></span></td>
+          <td><span class="ft-cli">${esc(g.cliente)}${g.inad ? " " + SELO_INAD : ""}</span><span class="fin-progresso" title="${pct}% recebido"><span style="width:${pct}%"></span></span></td>
           <td class="num">${reais(g.total)}</td>
           <td class="num">${reais(g.recebido)}</td>
           <td class="num"><b>${reais(g.falta)}</b></td>
@@ -170,7 +309,8 @@ function renderPorCliente() {
 // ---------- formulário de lançamento ----------
 async function abrirLancamento(l) {
   fin.editando = l || null;
-  $("#lc-titulo-dlg").textContent = l ? "Lançamento" : "Novo lançamento";
+  fin.pg = fin.pg?.onde === "form" ? null : fin.pg;
+  $("#lc-titulo-dlg").innerHTML = l ? `Lançamento${l.inadimplente ? " " + SELO_INAD : ""}` : "Novo lançamento";
   $("#lc-cliente").value = l?.cliente || "";
   $("#lc-total").value = l ? reais(l.valor_total) : "";
   $("#lc-entrada").value = l?.entrada ? reais(l.entrada) : "";
@@ -180,7 +320,9 @@ async function abrirLancamento(l) {
   const p1 = l?.parcelas.find((p) => p.numero === 1);
   $("#lc-primeiro").value = p1?.vencimento || "";
   $("#lc-obs").value = l?.observacoes || "";
-  fin.linhas = (l?.parcelas || []).map(({ numero, vencimento, valor, pago, pago_em }) => ({ numero, vencimento, valor, pago: !!pago, pago_em }));
+  $("#lc-inad").checked = !!l?.inadimplente;
+  fin.linhas = (l?.parcelas || []).map(({ numero, vencimento, valor, pagamentos }) =>
+    ({ numero, vencimento, valor, pagamentos: pagamentos.map(({ valor, data }) => ({ valor, data })) }));
   // vencimentos já mexidos à mão (diferentes do "1 por mês")? então não regera sozinho
   fin.editadas = !!p1 && fin.linhas.some((p) => p.numero > 0 && p.vencimento !== somarMeses(p1.vencimento, p.numero - 1));
   $("#lc-excluir").hidden = !l;
@@ -189,7 +331,7 @@ async function abrirLancamento(l) {
   $("#dlg-lancamento").showModal();
   if (!l) $("#lc-cliente").focus();
 
-  // listas de apoio: processos (para o select) e nomes de clientes já usados (Xablau e lançamentos)
+  // listas de apoio: processos (para o select) e nomes de clientes já usados (CLIENTES e lançamentos)
   const [procs, quadroDados] = await Promise.all([
     api("/api/processos").then((d) => d.processos).catch(() => []),
     api("/api/quadro").catch(() => ({ cards: [] })),
@@ -218,7 +360,8 @@ async function abrirLancamentoPorId(id) {
 
 const valorCampo = (sel) => lerReais($(sel).value);
 
-// Gera os vencimentos: entrada (data própria) + 1 parcela por mês a partir da 1ª data. Mantém "paga" de quem já tinha.
+// Gera os vencimentos: entrada (data própria) + 1 parcela por mês a partir da 1ª data. Mantém os pagamentos de quem
+// já tinha.
 function gerarLinhas() {
   const antigas = new Map(fin.linhas.map((p) => [p.numero, p]));
   const qtd = Math.max(0, Math.min(360, parseInt($("#lc-qtd").value, 10) || 0));
@@ -226,25 +369,30 @@ function gerarLinhas() {
   const linhas = linhaEntrada(antigas.get(0));
   if (primeiro && qtd) {
     for (let i = 0; i < qtd; i++) {
-      const velha = antigas.get(i + 1);
-      linhas.push({ numero: i + 1, vencimento: somarMeses(primeiro, i), valor, pago: velha?.pago || false, pago_em: velha?.pago_em || null });
+      linhas.push({ numero: i + 1, vencimento: somarMeses(primeiro, i), valor, pagamentos: antigas.get(i + 1)?.pagamentos || [] });
     }
   }
   fin.linhas = linhas;
   fin.editadas = false;
+  fin.pg = null;
   renderLinhas();
 }
 
 // Linha da entrada: sempre igual aos campos "valor da entrada" e "data de pagamento da entrada". Num lançamento novo,
-// com a data de hoje ou passada, já nasce marcada como paga nessa data (dá para desmarcar).
+// com a data de hoje ou passada, já nasce paga nessa data (dá para desmarcar) e esse pagamento acompanha o que for
+// digitado depois nos dois campos.
 function linhaEntrada(velha) {
   const valor = valorCampo("#lc-entrada"), data = $("#lc-entrada-data").value;
   if (!valor || !data) return [];
-  const pagaPadrao = !fin.editando && data <= isoLocal(new Date());
-  return [{ numero: 0, vencimento: data, valor, pago: velha ? velha.pago : pagaPadrao, pago_em: velha ? velha.pago_em : (pagaPadrao ? data : null) }];
+  let pagamentos = velha ? velha.pagamentos : [];
+  const automatico = !fin.editando && (!velha || (pagamentos.length === 1 && pagamentos[0].valor === velha.valor
+    && pagamentos[0].data === velha.vencimento));
+  if (automatico) pagamentos = data <= isoLocal(new Date()) ? [{ valor, data }] : [];
+  return [{ numero: 0, vencimento: data, valor, pagamentos }];
 }
 
 function atualizarEntrada() {
+  fin.pg = null;
   const resto = fin.linhas.filter((p) => p.numero > 0);
   fin.linhas = [...linhaEntrada(fin.linhas.find((p) => p.numero === 0)), ...resto];
   renderLinhas();
@@ -263,16 +411,21 @@ function camposParcelasMudaram() {
 function renderLinhas() {
   $("#lc-regerar").hidden = !fin.editadas;
   const qtd = parseInt($("#lc-qtd").value, 10) || 0;
-  $("#lc-linhas").innerHTML = fin.linhas.map((p, i) => `
-    <tr data-i="${i}" class="${p.pago ? "s-paga" : ""}">
+  $("#lc-linhas").innerHTML = fin.linhas.map((p, i) => {
+    const st = statusDe(p);
+    return `
+    <tr data-i="${i}" class="${st === "paga" ? "s-paga" : ""}">
       <td>${p.numero === 0 ? "Entrada" : `${p.numero}/${qtd || fin.linhas.filter((x) => x.numero > 0).length}`}</td>
       <td>${p.numero === 0 ? `${dataBrCompleta(p.vencimento)} <small class="ajuda">(data da entrada)</small>`
         : `<input type="date" class="campo lc-venc" value="${p.vencimento}" aria-label="Vencimento da parcela ${p.numero}">`}</td>
       <td>${p.numero === 0 ? reais(p.valor)
         : `<input type="text" class="campo dinheiro lc-valor" inputmode="decimal" value="${reais(p.valor)}" aria-label="Valor da parcela ${p.numero}">`}</td>
-      <td><input type="checkbox" class="lc-paga" ${p.pago ? "checked" : ""} aria-label="Paga"></td>
-      <td><input type="date" class="campo lc-pago-em" value="${p.pago_em || ""}" ${p.pago ? "" : "disabled"} aria-label="Data do pagamento"></td>
-    </tr>`).join("") || `<tr><td colspan="5" class="nada">Preencha a entrada e/ou a quantidade de parcelas e a 1ª data.</td></tr>`;
+      <td><input type="checkbox" class="lc-paga" ${st === "paga" ? "checked" : ""} ${st === "parcial" ? "data-parcial" : ""}
+        title="${st === "paga" ? "Desmarcar apaga os pagamentos" : "Marcar lança o que falta, com a data de hoje"}" aria-label="Paga"></td>
+      <td class="pg-cel">${pagamentosHTML(p)}</td>
+    </tr>${fin.pg?.onde === "form" && fin.pg.chave === i ? pgFormHTML(p, 5) : ""}`;
+  }).join("") || `<tr><td colspan="5" class="nada">Preencha a entrada e/ou a quantidade de parcelas e a 1ª data.</td></tr>`;
+  document.querySelectorAll("#lc-linhas .lc-paga[data-parcial]").forEach((c) => { c.indeterminate = true; });
   conferir();
 }
 
@@ -283,10 +436,9 @@ function conferir() {
   const qtd = parseInt($("#lc-qtd").value, 10) || 0;
   const somaParcelas = parcelas.length ? parcelas.reduce((s, p) => s + p.valor, 0) : (valorCampo("#lc-parcela") || 0) * qtd;
   const caixa = $("#lc-conf");
-  const recebido = fin.linhas.filter((p) => p.pago).reduce((s, p) => s + p.valor, 0);
-  const previsto = fin.linhas.reduce((s, p) => s + p.valor, 0);
+  const recebido = fin.linhas.reduce((s, p) => s + pagoDe(p), 0), falta = fin.linhas.reduce((s, p) => s + faltaDe(p), 0);
   $("#lc-saldo").innerHTML = fin.linhas.length
-    ? `Recebido <b>${reais(recebido)}</b> · Falta receber <b>${reais(previsto - recebido)}</b>` : "";
+    ? `Recebido <b>${reais(recebido)}</b> · Falta receber <b>${reais(falta)}</b>` : "";
   if (total === null || entrada === null || [...document.querySelectorAll("#form-lancamento .dinheiro")].some((c) => lerReais(c.value) === null)) {
     caixa.className = "lc-conf ruim";
     caixa.textContent = "Valor inválido: use o formato 1.234,56.";
@@ -336,6 +488,7 @@ function ajustar(tipo) {
 async function salvarLancamento() {
   const erro = (msg) => { $("#lc-erro").textContent = msg; $("#lc-erro").hidden = false; };
   $("#lc-erro").hidden = true;
+  if (fin.pg?.onde === "form") { erro("Há um pagamento aberto: salve ou cancele antes de salvar o lançamento."); return; }
   const cliente = $("#lc-cliente").value.trim();
   if (!cliente) { $("#lc-cliente").focus(); erro("Informe o nome do cliente."); return; }
   const dif = conferir();
@@ -353,7 +506,8 @@ async function salvarLancamento() {
   const d = {
     cliente, numero: $("#lc-processo").value || null, valor_total: total, entrada, entrada_data: $("#lc-entrada-data").value || null,
     valor_parcela: valorCampo("#lc-parcela") || 0, qtd_parcelas: qtd, observacoes: $("#lc-obs").value.trim() || null,
-    parcelas: fin.linhas.map((p) => ({ numero: p.numero, vencimento: p.vencimento, valor: p.valor, pago: p.pago, pago_em: p.pago ? p.pago_em : null })),
+    inadimplente: $("#lc-inad").checked,
+    parcelas: fin.linhas.map((p) => ({ numero: p.numero, vencimento: p.vencimento, valor: p.valor, pagamentos: p.pagamentos })),
   };
   try {
     if (fin.editando) await api(`/api/financeiro/lancamentos/${fin.editando.id}`, { method: "PUT", body: JSON.stringify(d) });
@@ -413,11 +567,24 @@ function ligarFinanceiro() {
     if (ev.target.classList.contains("fin-paga")) {
       const id = Number(ev.target.closest("[data-parcela]").dataset.parcela);
       marcarPaga(id, ev.target.checked);
+      return;
     }
+    // pagamentos: + (novo), ✎ (editar), ✕ (excluir) e o mini-formulário
+    const b = ev.target.closest("button");
+    if (!b || !b.closest("#fin-tabela")) return;
+    if (b.matches("[data-pg-salvar]")) { salvarPgTabela(); return; }
+    if (b.matches("[data-pg-cancelar]")) { fecharPgForm(); return; }
+    const linha = b.closest("[data-parcela]"), p = linha && parcelaPorId(Number(linha.dataset.parcela));
+    if (!p) return;
+    const pag = b.closest("[data-pag]") ? Number(b.closest("[data-pag]").dataset.pag) : null;
+    if (b.matches("[data-pg-novo]")) abrirPgForm("tabela", p.id);
+    else if (b.matches("[data-pg-editar]")) abrirPgForm("tabela", p.id, pag);
+    else if (b.matches("[data-pg-excluir]")) excluirPgTabela(p, pag);
   });
-  tela.addEventListener("change", (ev) => {
-    if (!ev.target.classList.contains("fin-pago-em") || !ev.target.value) return;
-    marcarPaga(Number(ev.target.closest("[data-parcela]").dataset.parcela), true, ev.target.value);
+  tela.addEventListener("keydown", (ev) => {
+    if (!ev.target.closest("[data-pg-form]")) return;
+    if (ev.key === "Enter") { ev.preventDefault(); salvarPgTabela(); }
+    if (ev.key === "Escape") fecharPgForm();
   });
 
   // formulário
@@ -450,12 +617,41 @@ function ligarFinanceiro() {
       renderLinhas();
     }
     if (el.classList.contains("lc-paga")) {
-      p.pago = el.checked;
-      p.pago_em = el.checked ? (p.pago_em || isoLocal(new Date())) : null;
+      // marcar lança o que falta com a data de hoje; desmarcar apaga os pagamentos (com mais de um, pergunta antes)
+      fin.pg = null;
+      if (el.checked && faltaDe(p) > 0) p.pagamentos = [...p.pagamentos, { valor: faltaDe(p), data: isoLocal(new Date()) }];
+      else if (!el.checked && (p.pagamentos.length < 2 || confirm(`Apagar os ${p.pagamentos.length} pagamentos desta parcela?`))) p.pagamentos = [];
       renderLinhas();
     }
-    if (el.classList.contains("lc-pago-em")) { p.pago_em = el.value || isoLocal(new Date()); }
   });
+  $("#lc-linhas").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    if (b.matches("[data-pg-salvar]")) { salvarPgForm(); return; }
+    if (b.matches("[data-pg-cancelar]")) { fecharPgForm(); return; }
+    const i = Number(b.closest("tr[data-i]")?.dataset.i), p = fin.linhas[i];
+    if (!p) return;
+    const pag = b.closest("[data-pag]") ? Number(b.closest("[data-pag]").dataset.pag) : null;
+    if (b.matches("[data-pg-novo]")) abrirPgForm("form", i);
+    else if (b.matches("[data-pg-editar]")) abrirPgForm("form", i, pag);
+    else if (b.matches("[data-pg-excluir]")) {
+      const g = p.pagamentos[pag];
+      if (!confirm(`Excluir o pagamento de ${reais(g.valor)} de ${dataBrCompleta(g.data)}?`)) return;
+      p.pagamentos.splice(pag, 1);
+      fin.pg = null;
+      renderLinhas();
+    }
+  });
+  // Enter no mini-formulário salva o pagamento (e não o diálogo); Esc fecha só o mini-formulário
+  $("#lc-linhas").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && ev.target.closest("[data-pg-form]")) { ev.preventDefault(); salvarPgForm(); }
+  });
+  $("#dlg-lancamento").addEventListener("cancel", (ev) => {
+    if (fin.pg?.onde !== "form") return;
+    ev.preventDefault();
+    fecharPgForm();
+  });
+  $("#dlg-lancamento").addEventListener("close", () => { if (fin.pg?.onde === "form") fin.pg = null; });
   $("#lc-salvar").onclick = salvarLancamento;
   $("#lc-excluir").onclick = excluirLancamento;
 }

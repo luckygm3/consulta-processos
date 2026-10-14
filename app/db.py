@@ -11,8 +11,8 @@ from . import cnj, config, texto as txt
 from .config import DB_DIR, DB_PATH
 
 log = logging.getLogger("db")
-SCHEMA_VERSAO = 6  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas;
-#                   6 = financeiro e aniversários
+SCHEMA_VERSAO = 7  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas;
+#                   6 = financeiro e aniversários; 7 = pagamentos parciais e cliente inadimplente
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS processos (
@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS lancamentos (         -- financeiro: um contrato de h
     valor_parcela     INTEGER NOT NULL DEFAULT 0,
     qtd_parcelas      INTEGER NOT NULL DEFAULT 0,
     observacoes       TEXT,
+    inadimplente      INTEGER NOT NULL DEFAULT 0, -- 1 = fora da renda do mês (continua no total a receber)
     criado_em         TEXT,
     atualizado_em     TEXT
 );
@@ -209,11 +210,19 @@ CREATE TABLE IF NOT EXISTS parcelas (            -- entrada (numero 0) e parcela
     numero            INTEGER NOT NULL,
     vencimento        TEXT NOT NULL,         -- AAAA-MM-DD (o lembrete no calendário cai no dia seguinte)
     valor             INTEGER NOT NULL,      -- centavos
-    pago              INTEGER NOT NULL DEFAULT 0,
-    pago_em           TEXT
+    pago              INTEGER NOT NULL DEFAULT 0, -- resumo da tabela pagamentos: 1 = quitada (pago >= valor)
+    pago_em           TEXT                   -- data do pagamento que quitou
 );
 CREATE INDEX IF NOT EXISTS ix_parcelas ON parcelas(lancamento_id, numero);
 CREATE INDEX IF NOT EXISTS ix_parcelas_venc ON parcelas(vencimento);
+CREATE TABLE IF NOT EXISTS pagamentos (           -- histórico de pagamentos (parciais ou não) de cada parcela
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    parcela_id        INTEGER NOT NULL,
+    valor             INTEGER NOT NULL,      -- centavos
+    data              TEXT NOT NULL,         -- AAAA-MM-DD
+    criado_em         TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_pagamentos ON pagamentos(parcela_id);
 CREATE TABLE IF NOT EXISTS lembretes_feitos (    -- lembretes calculados (ex.: aniversário) marcados como feitos
     chave             TEXT PRIMARY KEY,      -- ex.: aniv:<card>:<ano>
     feito_em          TEXT
@@ -307,6 +316,15 @@ def _migrar(con):
         if "aniversario" not in [r["name"] for r in con.execute("PRAGMA table_info(quadro_cards)")]:
             con.execute("ALTER TABLE quadro_cards ADD COLUMN aniversario TEXT")
         log.info("Migração do banco: financeiro e aniversários")
+    if versao < 7:
+        # v6 -> v7: pagamentos parciais (tabela nova, criada pelo SCHEMA; cada parcela já paga vira um pagamento do
+        # valor cheio na data em que foi paga) e "cliente inadimplente" no lançamento
+        if "inadimplente" not in [r["name"] for r in con.execute("PRAGMA table_info(lancamentos)")]:
+            con.execute("ALTER TABLE lancamentos ADD COLUMN inadimplente INTEGER NOT NULL DEFAULT 0")
+        con.execute("""INSERT INTO pagamentos(parcela_id, valor, data, criado_em)
+                       SELECT id, valor, COALESCE(pago_em, vencimento), ? FROM parcelas
+                       WHERE pago=1 AND valor > 0 AND id NOT IN (SELECT parcela_id FROM pagamentos)""", (agora(),))
+        log.info("Migração do banco: pagamentos parciais e cliente inadimplente")
     if versao < SCHEMA_VERSAO:
         meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
     semear_feriados(con)

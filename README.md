@@ -53,7 +53,7 @@ O DJEN (publicações) não precisa de chave.
 
 ## Uso
 
-O **menu lateral** tem as cinco telas: **Andamentos Processuais**, **Monitoramento**, **Xablau (Clientes)**,
+O **menu lateral** tem as cinco telas: **Andamentos Processuais**, **Monitoramento**, **CLIENTES**,
 **Agenda** e **Financeiro**, além de **Configurações** no pé. O selo vermelho no Monitoramento conta prazos que
 vencem hoje/amanhã ou já venceram; no Financeiro, parcelas em atraso. **Recolher** deixa só os ícones (o app lembra);
 em tela estreita (celular) o menu vira uma gaveta aberta pelo **☰**.
@@ -125,9 +125,9 @@ Prazos que o sistema cria para lembrar de monitorar, avaliar a pertinência e in
   ou só as filtradas; sugestões não confirmadas ficam de fora.
 - Ao abrir o app, uma faixa avisa quantos prazos vencem hoje/amanhã e quantos estão vencidos.
 
-## Xablau (Clientes)
+## Clientes (aba “CLIENTES”)
 
-O nome é provisório: troque a constante `NOME_QUADRO` no começo de `static/quadro.js`.
+Para renomear a aba, troque a constante `NOME_QUADRO` no começo de `static/quadro.js`.
 
 - **Aniversário** do cliente (campo no card): a Agenda mostra **“Parabenizar <cliente>”** todo ano nesse dia, com
   caixinha de feito (vale só para aquele ano; no ano seguinte aparece de novo). Quem nasceu em 29/02 é lembrado em 28/02
@@ -152,10 +152,11 @@ Um calendário só, por mês ou por semana, com feriados. Junta, sem copiar nada
 
 - **Monitoramento**: prazo fatal (cor da urgência) e data interna (contorno tracejado) das tarefas, e os itens com data
   das checklists delas;
-- **Checklists dos clientes**: itens com data dos cards do Xablau e o prazo fatal interno do card;
+- **Checklists dos clientes**: itens com data dos cards de CLIENTES e o prazo fatal interno do card;
 - **Aniversários**: “Parabenizar <cliente>”, todo ano;
-- **Financeiro**: cada parcela (e a entrada) aparece **1 dia depois do vencimento**, para conferir se foi paga. A
-  caixinha marca como paga com a data de hoje (para outra data, abra o lançamento); em atraso fica em vermelho.
+- **Financeiro**: cada parcela (e a entrada) aparece **1 dia depois do vencimento**, para conferir se foi paga; a
+  parcial aparece com o **valor que falta**. A caixinha lança o que falta com a data de hoje (para outro valor ou
+  data, use o **+** no Financeiro); em atraso fica em vermelho.
 
 Os botões acima do calendário ligam e desligam cada origem (o app lembra); o filtro de advogada vale para o
 Monitoramento e as checklists. Dia com muita coisa mostra 4 itens e “+N mais”. Clicar num item abre a tarefa, o card
@@ -163,7 +164,7 @@ ou o lançamento de onde ele veio; dois cliques num dia criam uma tarefa de moni
 
 ## Financeiro
 
-- **+ Novo lançamento**: nome do cliente (por extenso; sugere os nomes do Xablau), processo vinculado (opcional),
+- **+ Novo lançamento**: nome do cliente (por extenso; sugere os nomes de CLIENTES), processo vinculado (opcional),
   valor total, valor da entrada, valor das parcelas, quantidade de parcelas, data de pagamento da entrada e
   vencimento da 1ª parcela. Os vencimentos são gerados **um por mês** a partir da 1ª data (31/01 → 28/02 → 31/03) e
   podem ser mudados um a um, inclusive o valor de cada parcela. Depois de mexer à mão, mudar a quantidade ou a 1ª data
@@ -171,12 +172,20 @@ ou o lançamento de onde ele veio; dois cliques num dia criam uma tarefa de moni
 - **Conferência**: entrada + parcelas tem de dar o total. Se não der, o formulário mostra a diferença e oferece
   **Usar … como total** ou **Recalcular parcelas** ((total − entrada) ÷ quantidade; os centavos que sobram vão para a
   última). Dá para salvar mesmo sem fechar, com confirmação.
-- **Paga**: caixinha em cada parcela (no lançamento, na tabela ou na Agenda), com a data do pagamento (padrão: hoje;
-  editável). O saldo (recebido / falta receber) é recalculado na hora. Entrada com data de hoje ou passada já nasce
-  marcada como paga nessa data (dá para desmarcar).
-- **Painel**: cards com *a receber no mês* (com ‹ › para outros meses), *recebido no mês*, *recebido no ano*,
-  *total a receber* e *em atraso*; **Inadimplentes** (parcelas vencidas e não pagas, com valor e dias de atraso, por
-  cliente) e **Próximas parcelas**. Embaixo, a tabela de **Parcelas** (Todas / Pendentes / Pagas / Atrasadas, busca e
+- **Pagamento parcial**: o **+** em cada parcela (na tabela ou no lançamento) abre um mini-formulário com o valor pago
+  e a data. Cada pagamento entra no **histórico** da parcela (não sobrescreve o anterior) e pode ser editado (✎) ou
+  excluído (✕). A parcela mostra “pago R$ X de R$ Y — falta R$ Z” e fica **pendente** (nada pago), **parcial** ou
+  **paga** (pago ≥ valor). A parcial continua aberta: o restante segue no vencimento, no atraso e na Agenda.
+- **Paga**: caixinha em cada parcela (no lançamento, na tabela ou na Agenda). Marcar lança o que falta com a data de
+  hoje; desmarcar apaga os pagamentos da parcela (com mais de um, pergunta antes). Entrada com data de hoje ou passada
+  já nasce paga nessa data (dá para desmarcar). O saldo (recebido / falta receber) é recalculado na hora.
+- **Cliente inadimplente**: caixa no lançamento, “Não contabilizar na renda do mês”. Marcada, as parcelas saem do
+  *a receber no mês*, do previsto, do *em atraso* e do selo do menu, mas continuam no cadastro e no *total a receber*.
+  O nome ganha o selo “inadimplente” no Financeiro e no card de CLIENTES de mesmo nome. Desmarcar volta tudo ao normal.
+- **Painel**: cards com *a receber no mês* (com ‹ › para outros meses; parcial conta pelo que falta),
+  *recebido no mês* e *recebido no ano* (pela data de cada pagamento), *total a receber* e *em atraso*; os blocos
+  **Em atraso** (parcelas vencidas e não pagas, com valor e dias de atraso, por cliente), **Inadimplentes** (os
+  clientes marcados, com o valor em atraso de cada um) e **Próximas parcelas**. Embaixo, a tabela de **Parcelas** (Todas / Pendentes / Pagas / Atrasadas, busca e
   “só vencimentos do mês”) e a visão **Por cliente** (total, recebido, quanto falta, em atraso e próximo vencimento).
 - Valores em R$ (digite `1500`, `1.500` ou `1.500,00`); guardados em centavos, sem erro de arredondamento.
 
@@ -236,7 +245,7 @@ app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, text
             quadro de clientes: quadro.py (inclui aniversários), rotas_quadro.py; checklist.py (itens, "feito" e equipe);
             financeiro: financeiro.py, rotas_financeiro.py
 static/     interface (HTML/CSS/JS puro; app.js = Andamentos e menu lateral; agenda.js = Monitoramento;
-            quadro.js = Xablau; calendario.js = Agenda; financeiro.js = Financeiro;
+            quadro.js = CLIENTES; calendario.js = Agenda; financeiro.js = Financeiro;
             checklist.js = editor de checklist reutilizável)
 tests/      testes do cálculo de prazos, da detecção no texto, da agenda, do quadro e do financeiro
 db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git.

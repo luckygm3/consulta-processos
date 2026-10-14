@@ -1,9 +1,9 @@
 "use strict";
 // Agenda: calendário único. Junta, sem copiar nada, o que já existe em cada lugar:
 // - Monitoramento: prazo fatal e data interna das tarefas, e os itens com data das checklists delas;
-// - Clientes (Xablau): itens com data das checklists dos cards e o prazo fatal interno do card;
+// - CLIENTES: itens com data das checklists dos cards e o prazo fatal interno do card;
 // - Aniversários: "Parabenizar <cliente>" todo ano, com "feito" por ano;
-// - Financeiro: lembrete de cada parcela 1 dia depois do vencimento, para conferir se foi paga.
+// - Financeiro: lembrete de cada parcela 1 dia depois do vencimento, para conferir se foi paga (a parcial, pelo que falta).
 // Usa helpers de app.js, agenda.js (dataBr, itemAgendaHTML, prazoCardHTML, entradasDe, abrirTarefa…) e quadro.js.
 
 const FONTES = ["monitoramento", "clientes", "aniversarios", "financeiro"];
@@ -59,12 +59,15 @@ function aniversarioHTML(a) {
 }
 
 function parcelaHTML(p) {
-  const situacao = p.pago ? `paga em ${dataBrCompleta(p.pago_em)}` : p.situacao === "atrasada" ? `em atraso há ${p.dias_atraso} dia(s)` : "";
+  const parcial = p.status === "parcial";
+  const situacao = p.pago ? `paga em ${dataBrCompleta(p.pago_em)}` : [
+    parcial ? `pago ${reais(p.pago_valor)} de ${reais(p.valor)} — falta ${reais(p.falta)}` : "",
+    p.situacao === "atrasada" ? `em atraso há ${p.dias_atraso} dia(s)` : ""].filter(Boolean).join(" · ");
   return `<div class="cal-item cal-parc ${p.pago ? "feito" : ""} ${!p.pago && p.situacao === "atrasada" ? "atrasada" : ""}"
       data-parcela="${p.id}" data-lanc="${p.lancamento_id}" role="button" tabindex="0"
-      title="Conferir pagamento: ${esc(p.cliente)} · ${p.numero === 0 ? "entrada" : "parcela " + esc(p.rotulo)} de ${reais(p.valor)}, venceu em ${dataBrCompleta(p.vencimento)}${situacao ? " — " + situacao : ""}">
-    <input type="checkbox" class="ck-parc" ${p.pago ? "checked" : ""} aria-label="Paga: ${esc(p.cliente)} ${esc(p.rotulo)}">
-    <span class="it-txt"><b class="it-rs">R$</b> ${esc(p.cliente)} · ${p.numero === 0 ? "entrada" : esc(p.rotulo)} · ${reais(p.valor)}</span></div>`;
+      title="Conferir pagamento: ${esc(p.cliente)}${p.inadimplente ? " (inadimplente)" : ""} · ${p.numero === 0 ? "entrada" : "parcela " + esc(p.rotulo)} de ${reais(p.valor)}, venceu em ${dataBrCompleta(p.vencimento)}${situacao ? " — " + situacao : ""}">
+    <input type="checkbox" class="ck-parc" ${p.pago ? "checked" : ""} ${parcial ? "data-parcial" : ""} aria-label="Paga: ${esc(p.cliente)} ${esc(p.rotulo)}">
+    <span class="it-txt"><b class="it-rs">R$</b> ${esc(p.cliente)} · ${p.numero === 0 ? "entrada" : esc(p.rotulo)} · ${parcial ? `falta ${reais(p.falta)}` : reais(p.valor)}</span></div>`;
 }
 
 function renderCalendarioUnico(datas) {
@@ -117,6 +120,7 @@ function renderCalendarioUnico(datas) {
         <button type="button" class="cal-mais" data-mais aria-expanded="false">+${resto} mais</button>` : ""}
     </div>`;
   }).join("");
+  document.querySelectorAll("#cal-grade .ck-parc[data-parcial]").forEach((c) => { c.indeterminate = true; });
 }
 
 async function marcarAniversario(chave, feito) {
@@ -128,10 +132,18 @@ async function marcarAniversario(chave, feito) {
   recarregarTela();
 }
 
+// Marcar lança o que falta com a data de hoje (parcial ou não); desmarcar apaga os pagamentos da parcela
 async function marcarParcelaPaga(id, pago) {
+  const p = cal.dados.parcelas.find((x) => x.id === id);
+  if (!pago && p && p.pagamentos.length > 1
+    && !confirm(`Apagar os ${p.pagamentos.length} pagamentos desta parcela (${reais(p.pago_valor)})?`)) {
+    recarregarTela();
+    return;
+  }
   try {
     await api(`/api/financeiro/parcelas/${id}/pagar`, { method: "POST", body: JSON.stringify({ pago }) });
-    toast(pago ? "Parcela marcada como paga hoje. Para mudar a data, abra o lançamento." : "Parcela desmarcada.");
+    toast(!pago ? "Parcela desmarcada." : p?.status === "parcial" ? `Parcela quitada: lançado o que faltava (${reais(p.falta)}) com a data de hoje.`
+      : "Parcela marcada como paga hoje. Para outro valor ou data, use o + no Financeiro.");
   } catch (e) {
     toast("Erro: " + e.message);
   }

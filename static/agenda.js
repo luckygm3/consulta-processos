@@ -136,7 +136,7 @@ function abrirPai(dono, id, tarefas = ag.tarefas) {
   else abrirTarefa(tarefas.find((t) => t.id === id));
 }
 
-// Depois de salvar algo: recarrega a tela aberta (Monitoramento, Agenda, Xablau…) e os selos do menu
+// Depois de salvar algo: recarrega a tela aberta (Monitoramento, Agenda, CLIENTES…) e os selos do menu
 function recarregarTela() {
   const carregar = TELAS[estado.tela];
   if (carregar) carregar().catch((e) => toast("Erro: " + e.message));

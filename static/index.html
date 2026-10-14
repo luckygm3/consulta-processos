@@ -208,7 +208,11 @@
       <div class="fin-cards" id="fin-cards"></div>
       <div class="fin-colunas">
         <section class="fin-bloco">
-          <h3>Inadimplentes <small>parcelas vencidas e não pagas</small></h3>
+          <h3>Em atraso <small>parcelas vencidas e não pagas</small></h3>
+          <div id="fin-atraso"></div>
+        </section>
+        <section class="fin-bloco">
+          <h3>Inadimplentes <small id="fin-inad-sub">fora da renda do mês</small></h3>
           <div id="fin-inad"></div>
         </section>
         <section class="fin-bloco">
@@ -416,10 +420,12 @@
         <button class="btn mini" type="button" id="lc-regerar" hidden>Regerar vencimentos</button>
       </div>
       <div class="tabela-rolagem lc-rolagem"><table class="tabela compacta lc-tabela">
-        <thead><tr><th>Parcela</th><th>Vencimento</th><th>Valor</th><th>Paga</th><th>Pago em</th></tr></thead>
+        <thead><tr><th>Parcela</th><th>Vencimento</th><th>Valor</th><th>Paga</th><th>Pagamentos</th></tr></thead>
         <tbody id="lc-linhas"></tbody>
       </table></div>
       <div class="lc-saldo" id="lc-saldo"></div>
+      <label class="chk lc-inad"><input type="checkbox" id="lc-inad"> Não contabilizar na renda do mês (cliente inadimplente)</label>
+      <p class="ajuda lc-inad-ajuda">As parcelas saem do “a receber no mês” e do previsto, mas continuam aqui e no total a receber.</p>
       <label class="rotulo">Observações <textarea id="lc-obs" rows="2"></textarea></label>
       <div class="nota erro" id="lc-erro" hidden></div>
       <div class="dialogo-acoes">

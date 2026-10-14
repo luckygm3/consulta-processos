@@ -2,7 +2,7 @@
 // Quadro de clientes (kanban estilo Trello). Usa app.js (api, esc, toast, memoriaCards, abrirPainel…),
 // checklist.js (criarChecklist, progressoChecklist) e agenda.js (TELAS).
 
-const NOME_QUADRO = "Xablau"; // nome da aba na tela: para renomear, troque só aqui
+const NOME_QUADRO = "CLIENTES"; // nome da aba na tela: para renomear, troque só aqui
 
 const qd = {
   colunas: [], cards: [], tipos: {}, tipo: "processo", editando: null, coluna: null, arrastando: null, ck: null,
@@ -59,7 +59,7 @@ function cardHTML(c) {
       : `<div class="c-proc">${esc(c.numero_fmt)}</div>`;
   return `
     <article class="cartao qd-card ${qd.memoria.contraido(c.id) ? "contraido" : ""}" draggable="true" data-id="${c.id}">
-      <div class="c-cab"><span class="c-titulo">${esc(c.titulo)}</span>${progressoChecklist(c.checklist)}</div>
+      <div class="c-cab"><span class="c-titulo">${esc(c.titulo)}${c.inadimplente ? ` <span class="selo selo-inad" title="Marcado como inadimplente no Financeiro">inadimplente</span>` : ""}</span>${progressoChecklist(c.checklist)}</div>
       ${vinculo}
       ${c.tipo === "processo" && c.partes ? `<div class="c-partes">${esc(c.partes)}</div>` : ""}
       ${prazoLinhaHTML(c.prazo)}
@@ -258,7 +258,7 @@ async function salvarCard() {
     if (qd.editando) await api(`/api/quadro/cards/${qd.editando.id}`, { method: "PATCH", body: JSON.stringify(d) });
     else await api("/api/quadro/cards", { method: "POST", body: JSON.stringify({ ...d, coluna_id: qd.coluna }) });
     $("#dlg-card").close();
-    recarregarTela(); // Xablau, ou a tela de onde o card foi aberto (Monitoramento, Agenda)
+    recarregarTela(); // CLIENTES, ou a tela de onde o card foi aberto (Monitoramento, Agenda)
   } catch (e) {
     $("#qc-erro").textContent = e.message;
     $("#qc-erro").hidden = false;
@@ -291,8 +291,8 @@ async function abrirCardPorId(id) {
 
 // ---------- eventos ----------
 function ligarQuadro() {
-  // menu lateral e topo: "Xablau (Clientes)"
-  const nome = `${NOME_QUADRO} (Clientes)`;
+  // menu lateral e topo
+  const nome = NOME_QUADRO;
   $("#sb-rotulo-quadro").textContent = nome;
   document.querySelector('.sb-item[data-tela="quadro"]').title = nome;
   CABECALHOS.quadro[0] = nome;
