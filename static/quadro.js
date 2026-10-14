@@ -2,7 +2,7 @@
 // Quadro de clientes (kanban estilo Trello). Usa app.js (api, esc, toast, memoriaCards, abrirPainel…),
 // checklist.js (criarChecklist, progressoChecklist) e agenda.js (TELAS).
 
-const NOME_QUADRO = "CLIENTES"; // nome da aba na tela: para renomear, troque só aqui
+const NOME_QUADRO = "Clientes"; // nome da aba na tela: para renomear, troque só aqui
 
 const qd = {
   colunas: [], cards: [], tipos: {}, tipo: "processo", editando: null, coluna: null, arrastando: null, ck: null,
@@ -258,7 +258,7 @@ async function salvarCard() {
     if (qd.editando) await api(`/api/quadro/cards/${qd.editando.id}`, { method: "PATCH", body: JSON.stringify(d) });
     else await api("/api/quadro/cards", { method: "POST", body: JSON.stringify({ ...d, coluna_id: qd.coluna }) });
     $("#dlg-card").close();
-    recarregarTela(); // CLIENTES, ou a tela de onde o card foi aberto (Monitoramento, Agenda)
+    recarregarTela(); // Clientes, ou a tela de onde o card foi aberto (Monitoramento, Agenda)
   } catch (e) {
     $("#qc-erro").textContent = e.message;
     $("#qc-erro").hidden = false;

@@ -1,7 +1,7 @@
 "use strict";
 // Agenda: calendário único. Junta, sem copiar nada, o que já existe em cada lugar:
 // - Monitoramento: prazo fatal e data interna das tarefas, e os itens com data das checklists delas;
-// - CLIENTES: itens com data das checklists dos cards e o prazo fatal interno do card;
+// - Clientes: itens com data das checklists dos cards e o prazo fatal interno do card;
 // - Aniversários: "Parabenizar <cliente>" todo ano, com "feito" por ano;
 // - Financeiro: lembrete de cada parcela 1 dia depois do vencimento, para conferir se foi paga (a parcial, pelo que falta).
 // Usa helpers de app.js, agenda.js (dataBr, itemAgendaHTML, prazoCardHTML, entradasDe, abrirTarefa…) e quadro.js.

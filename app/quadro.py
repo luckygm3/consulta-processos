@@ -1,4 +1,4 @@
-"""Quadro de clientes (aba CLIENTES; o nome fica em static/quadro.js): 5 colunas que ela nomeia, cards de
+"""Quadro de clientes (aba Clientes; o nome fica em static/quadro.js): 5 colunas que ela nomeia, cards de
 cliente criados à mão, com a checklist padrão, ligados a um processo ou marcados como petição inicial (o processo
 ainda não existe) ou preventivo/consultoria."""
 import calendar

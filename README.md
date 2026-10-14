@@ -53,7 +53,7 @@ O DJEN (publicações) não precisa de chave.
 
 ## Uso
 
-O **menu lateral** tem as cinco telas: **Andamentos Processuais**, **Monitoramento**, **CLIENTES**,
+O **menu lateral** tem as cinco telas: **Andamentos Processuais**, **Monitoramento**, **Clientes**,
 **Agenda** e **Financeiro**, além de **Configurações** no pé. O selo vermelho no Monitoramento conta prazos que
 vencem hoje/amanhã ou já venceram; no Financeiro, parcelas em atraso. **Recolher** deixa só os ícones (o app lembra);
 em tela estreita (celular) o menu vira uma gaveta aberta pelo **☰**.
@@ -132,7 +132,7 @@ Prazos que o sistema cria para lembrar de monitorar, avaliar a pertinência e in
   ou só as filtradas; sugestões não confirmadas ficam de fora.
 - Ao abrir o app, uma faixa avisa quantos prazos vencem hoje/amanhã e quantos estão vencidos.
 
-## Clientes (aba “CLIENTES”)
+## Clientes
 
 Para renomear a aba, troque a constante `NOME_QUADRO` no começo de `static/quadro.js`.
 
@@ -159,7 +159,7 @@ Um calendário só, por mês ou por semana, com feriados. Junta, sem copiar nada
 
 - **Monitoramento**: prazo fatal (cor da urgência) e data interna (contorno tracejado) das tarefas, e os itens com data
   das checklists delas;
-- **Checklists dos clientes**: itens com data dos cards de CLIENTES e o prazo fatal interno do card;
+- **Checklists dos clientes**: itens com data dos cards de Clientes e o prazo fatal interno do card;
 - **Aniversários**: “Parabenizar <cliente>”, todo ano;
 - **Financeiro**: cada parcela (e a entrada) aparece **1 dia depois do vencimento**, para conferir se foi paga; a
   parcial aparece com o **valor que falta**. A caixinha lança o que falta com a data de hoje (para outro valor ou
@@ -171,7 +171,7 @@ ou o lançamento de onde ele veio; dois cliques num dia criam uma tarefa de moni
 
 ## Financeiro
 
-- **+ Novo lançamento**: nome do cliente (por extenso; sugere os nomes de CLIENTES), processo vinculado (opcional),
+- **+ Novo lançamento**: nome do cliente (por extenso; sugere os nomes de Clientes), processo vinculado (opcional),
   valor total, valor da entrada, valor das parcelas, quantidade de parcelas, data de pagamento da entrada e
   vencimento da 1ª parcela. Os vencimentos são gerados **um por mês** a partir da 1ª data (31/01 → 28/02 → 31/03) e
   podem ser mudados um a um, inclusive o valor de cada parcela. Depois de mexer à mão, mudar a quantidade ou a 1ª data
@@ -188,7 +188,7 @@ ou o lançamento de onde ele veio; dois cliques num dia criam uma tarefa de moni
   já nasce paga nessa data (dá para desmarcar). O saldo (recebido / falta receber) é recalculado na hora.
 - **Cliente inadimplente**: caixa no lançamento, “Não contabilizar na renda do mês”. Marcada, as parcelas saem do
   *a receber no mês*, do previsto, do *em atraso* e do selo do menu, mas continuam no cadastro e no *total a receber*.
-  O nome ganha o selo “inadimplente” no Financeiro e no card de CLIENTES de mesmo nome. Desmarcar volta tudo ao normal.
+  O nome ganha o selo “inadimplente” no Financeiro e no card de Clientes de mesmo nome. Desmarcar volta tudo ao normal.
 - **Painel**: cards com *a receber no mês* (com ‹ › para outros meses; parcial conta pelo que falta),
   *recebido no mês* e *recebido no ano* (pela data de cada pagamento), *total a receber* e *em atraso*; os blocos
   **Em atraso** (parcelas vencidas e não pagas, com valor e dias de atraso, por cliente), **Inadimplentes** (os
@@ -254,7 +254,7 @@ app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, text
             quadro de clientes: quadro.py (inclui aniversários), rotas_quadro.py; checklist.py (itens, "feito" e equipe);
             financeiro: financeiro.py, rotas_financeiro.py
 static/     interface (HTML/CSS/JS puro; app.js = Andamentos e menu lateral; agenda.js = Monitoramento;
-            quadro.js = CLIENTES; calendario.js = Agenda; financeiro.js = Financeiro;
+            quadro.js = Clientes; calendario.js = Agenda; financeiro.js = Financeiro;
             checklist.js = editor de checklist reutilizável)
 tests/      testes do cálculo de prazos, da detecção no texto, da agenda, do quadro e do financeiro
 db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git.

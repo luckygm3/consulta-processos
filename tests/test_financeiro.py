@@ -210,7 +210,7 @@ class InadimplenteTest(unittest.TestCase):
         self.assertEqual(r["inadimplentes"]["valor"], 300000)  # entrada, 1/4 e 2/4 vencidas
         self.assertEqual([(g["cliente"], g["parcelas"], g["desde"]) for g in r["inadimplentes"]["lista"]],
                          [("Maria da Silva", 3, "2026-09-10")])
-        # selo no card de CLIENTES com o mesmo nome (sem diferenciar acento, maiúscula ou espaço)
+        # selo no card de Clientes com o mesmo nome (sem diferenciar acento, maiúscula ou espaço)
         quadro.criar(con, {"coluna_id": 1, "titulo": "MARIA  DA SÍLVA", "tipo": "preventivo"})
         self.assertTrue(quadro.carregar(con, HOJE)["cards"][0]["inadimplente"])
         # desmarcar volta tudo ao normal

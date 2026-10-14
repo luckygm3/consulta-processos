@@ -157,14 +157,12 @@ function renderFinanceiro() {
   $("#fin-mes-titulo").textContent = mesTexto(fin.mes);
   const mes = nomeMes(fin.mes);
   const card = (titulo, valor, sub, classe = "") =>
-    `<div class="fin-card ${classe}"><div class="fin-card-tit">${titulo}</div><div class="fin-card-valor">${valor}</div><div class="fin-card-sub">${sub}</div></div>`;
+    `<div class="fin-card ${classe}"><div class="fin-card-tit">${titulo}</div><div class="fin-card-valor">${valor}</div>${sub ? `<div class="fin-card-sub">${sub}</div>` : ""}</div>`;
   const qtdLanc = d.lancamentos.filter((l) => l.falta > 0).length;
-  const ar = r.a_receber_mes, inad = r.inadimplentes;
-  // parcela parcial conta pelo que falta; inadimplente fica fora da renda do mês (mostra quanto ficou de fora)
-  const subMes = [ar.previsto ? `${ar.qtd_pendente} parcela(s) em aberto · ${reais(ar.pago)} já pago de ${reais(ar.previsto)}` : "nada vence neste mês",
-    ar.inadimplentes ? `${reais(ar.inadimplentes)} de inadimplentes fora da conta` : ""].filter(Boolean).join(" · ");
+  const inad = r.inadimplentes;
   $("#fin-cards").innerHTML = [
-    card(`A receber em ${mes}`, reais(ar.pendente), subMes, "destaque"),
+    // parcela parcial conta pelo que falta; inadimplente fica fora (aparece no bloco "Inadimplentes")
+    card(`A receber em ${mes}`, reais(r.a_receber_mes.pendente), "", "destaque"),
     card(`Recebido em ${mes}`, reais(r.recebido_mes), "pela data de cada pagamento"),
     card(`Recebido em ${fin.mes.slice(0, 4)}`, reais(r.recebido_ano), "no ano todo"),
     card("Total a receber", reais(r.total_a_receber), qtdLanc ? `em ${qtdLanc} lançamento(s)` : "nada em aberto"),
@@ -331,7 +329,7 @@ async function abrirLancamento(l) {
   $("#dlg-lancamento").showModal();
   if (!l) $("#lc-cliente").focus();
 
-  // listas de apoio: processos (para o select) e nomes de clientes já usados (CLIENTES e lançamentos)
+  // listas de apoio: processos (para o select) e nomes de clientes já usados (Clientes e lançamentos)
   const [procs, quadroDados] = await Promise.all([
     api("/api/processos?incluir_cooperacao=true").then((d) => d.processos).catch(() => []),
     api("/api/quadro").catch(() => ({ cards: [] })),
