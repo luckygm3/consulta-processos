@@ -1,19 +1,17 @@
 """Testes dos processos em cooperação. Rodar: python -m unittest discover -s tests -t . -v"""
-import sqlite3
 import unittest
 
 from app import agenda, config, db
+from tests.supabase_local import TesteComBanco
 
 LISTA = [{"nome": "Jessica Delmoni", "oab_numero": "13043", "oab_uf": "AL"}]
 COM_OAB, SEM_OAB, OUTRO_UF, NORMAL = ("00010000020268160001", "00020000020268160001", "00030000020268160001",
                                       "00040000020268160001")
 
 
-def banco():
-    con = sqlite3.connect(":memory:")
-    con.row_factory = sqlite3.Row
-    con.executescript(db.SCHEMA)
-    return con
+class Base(TesteComBanco):
+    def banco(self):
+        return self.conexao()
 
 
 def publicacao(con, numero, *advogados):
@@ -25,9 +23,9 @@ def publicacao(con, numero, *advogados):
 BEATRIZ = {"nome": "BEATRIZ DAFFARA", "numero_oab": "130678", "uf_oab": "PR"}
 
 
-class DeteccaoTest(unittest.TestCase):
+class DeteccaoTest(Base):
     def setUp(self):
-        self.con = banco()
+        self.con = self.banco()
         publicacao(self.con, COM_OAB, BEATRIZ, {"nome": "JESSICA FERREIRA DELMONI", "numero_oab": "13043", "uf_oab": "AL"})
         publicacao(self.con, SEM_OAB, BEATRIZ, {"nome": "Jéssica Ferreira Delmoni"})  # sem OAB: casa pelo nome
         publicacao(self.con, OUTRO_UF, BEATRIZ, {"nome": "JESSICA DELMONI", "numero_oab": "13043", "uf_oab": "SP"})
@@ -35,7 +33,7 @@ class DeteccaoTest(unittest.TestCase):
 
     def test_pela_oab_e_sem_oab_pelo_nome(self):
         self.assertEqual(db.atualizar_cooperacao(self.con, lista=LISTA), 2)
-        marcados = {r[0] for r in self.con.execute("SELECT numero FROM processos WHERE cooperacao=1")}
+        marcados = {r[0] for r in self.con.execute("SELECT numero FROM processos WHERE cooperacao")}
         # OAB de outra UF não casa, mesmo com o nome igual: com OAB dos dois lados, vale só a OAB
         self.assertEqual(marcados, {COM_OAB, SEM_OAB})
 
@@ -53,7 +51,7 @@ class DeteccaoTest(unittest.TestCase):
         self.assertEqual((ps[NORMAL]["cooperacao"], ps[NORMAL]["cooperacao_auto"]), (True, False))
         # marcar igual à automática volta a seguir a automática
         db.marcar_cooperacao(self.con, COM_OAB, True)
-        self.assertIsNone(self.con.execute("SELECT cooperacao_manual FROM processos WHERE numero=?", (COM_OAB,)).fetchone()[0])
+        self.assertIsNone(self.con.execute("SELECT cooperacao_manual FROM processos WHERE numero=%s", (COM_OAB,)).fetchone()[0])
 
     def test_monitoramento_esconde_tarefas_so_com_a_opcao_ligada(self):
         db.atualizar_cooperacao(self.con, lista=LISTA)
@@ -65,17 +63,6 @@ class DeteccaoTest(unittest.TestCase):
         self.assertEqual(titulos(False), ["Prazo da cooperação", "Prazo normal", "Tarefa solta"])
         # nada sai do banco
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM tarefas").fetchone()[0], 3)
-
-    def test_migracao_marca_os_processos_existentes(self):
-        db.meta_set(self.con, "schema_versao", "7")
-        original = config.carregar
-        config.carregar = lambda com_env=True: {**original(com_env), "advogados_cooperacao": LISTA}
-        try:
-            db._migrar(self.con)
-        finally:
-            config.carregar = original
-        self.assertEqual({r[0] for r in self.con.execute("SELECT numero FROM processos WHERE cooperacao=1")},
-                         {COM_OAB, SEM_OAB})
 
 
 class ConfigTest(unittest.TestCase):

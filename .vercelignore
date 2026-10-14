@@ -1,0 +1,10 @@
+# Não sobe para a Vercel: banco antigo, logs, ambiente local, testes e segredos
+db/
+logs/
+.venv/
+tests/
+scripts/
+.env
+*.command
+run.bat
+run.sh

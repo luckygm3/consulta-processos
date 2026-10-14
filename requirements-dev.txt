@@ -1,0 +1,4 @@
+# Só para desenvolvimento (testes com um Postgres local que imita o Supabase)
+-r requirements.txt
+pgserver>=0.1.4
+pyflakes>=3.2

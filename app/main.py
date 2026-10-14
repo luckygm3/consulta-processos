@@ -1,4 +1,5 @@
-"""Servidor local (FastAPI): API JSON + interface estática. Escuta só em 127.0.0.1 (ver run.py)."""
+"""Servidor (FastAPI): API JSON + interface estática. No computador escuta só em 127.0.0.1 (ver run.py); na
+Vercel roda como função (api/index.py). Toda a API exige login (app/auth.py); os dados ficam no Supabase."""
 import logging
 import re
 
@@ -7,15 +8,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import cnj, config, db, rotas_agenda, rotas_financeiro, rotas_quadro
+from . import auth, banco_antigo, cnj, config, db, rotas_agenda, rotas_financeiro, rotas_quadro, sync
 from .config import STATIC_DIR
-from .sync import sincronizador
 
 config.configurar_log()
-db.iniciar()
 log = logging.getLogger("app")
 
 app = FastAPI(title="Processos", docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(auth.ExigirLogin)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(rotas_agenda.rotas)
 app.include_router(rotas_quadro.rotas)
@@ -50,20 +50,28 @@ def ping():
     return {"app": "processos-beatriz"}
 
 
+@app.get("/api/publico")
+def publico():
+    """O que a tela precisa para o login: endereço do Supabase e a chave pública (anon). Nada de segredo aqui."""
+    return {"supabase_url": config.ambiente("SUPABASE_URL"), "supabase_anon_key": config.ambiente("SUPABASE_ANON_KEY")}
+
+
 @app.get("/api/estado")
 def estado():
-    cfg = config.carregar()
-    visiveis = f"{db.COOPERACAO_SQL} = 0" if cfg["ocultar_cooperacao"] else "1=1"
     with db.conexao() as con:
+        db.garantir_padroes(con)  # tipos de ato e feriados dos próximos anos, se ainda não existirem
+        cfg = config.efetiva(con)
+        visiveis = f"NOT {db.COOPERACAO_SQL}" if cfg["ocultar_cooperacao"] else "true"
         total = con.execute(f"SELECT COUNT(*) FROM processos WHERE {visiveis}").fetchone()[0]
         novos = con.execute(f"SELECT COUNT(*) FROM processos WHERE {visiveis} AND novidade_em IS NOT NULL "
                             "AND (visto_em IS NULL OR novidade_em > visto_em)").fetchone()[0]
         ultima = db.meta_get(con, "ultima_atualizacao")
         advogadas = db.advogadas(con)
+        banco_local = banco_antigo.situacao(con)  # "pendente": a pasta db/ deste computador tem dados fora do Supabase
+    eu = db.usuaria_atual() or {}
     return {
-        "nome": cfg["nome_advogado"], "oab": f"{cfg['oab_numero']}/{cfg['oab_uf']}".strip("/"),
         "advogadas": advogadas, "tem_chave": bool(cfg["datajud_api_key"]), "ultima_atualizacao": ultima,
-        "total": total, "novos": novos, "sync": sincronizador.status(),
+        "total": total, "novos": novos, "sync": sync.status(), "usuaria": eu.get("email"), "banco_local": banco_local,
     }
 
 
@@ -71,8 +79,8 @@ def estado():
 def processos(tribunal: str = "", q: str = "", novidades: bool = False, advogada: int | None = None,
               incluir_cooperacao: bool = False):
     """incluir_cooperacao: para as listas de escolha (vincular card/lançamento), que mostram todos os processos."""
-    ocultar = config.carregar()["ocultar_cooperacao"] and not incluir_cooperacao
     with db.conexao() as con:
+        ocultar = config.efetiva(con)["ocultar_cooperacao"] and not incluir_cooperacao
         lista = db.listar(con, tribunal=tribunal, q=q.strip(), so_novidades=novidades)
         filtros = db.opcoes_filtros(con)
         advogadas = db.advogadas(con)
@@ -104,7 +112,7 @@ def processo(numero: str):
 @app.post("/api/processos/{numero}/visto")
 def marcar_visto(numero: str):
     with db.conexao() as con:
-        con.execute("UPDATE processos SET visto_em=? WHERE numero=?", (db.agora(), _numero(numero)))
+        con.execute("UPDATE processos SET visto_em=%s WHERE numero=%s", (db.agora(), _numero(numero)))
     return {"ok": True}
 
 
@@ -122,16 +130,16 @@ def marcar_cooperacao(numero: str, dados: dict = Body(...)):
 def marcar_todos_vistos(advogada: int | None = None):
     with db.conexao() as con:
         if advogada:  # com o filtro de advogada ativo, só marca os processos dela
-            con.execute("UPDATE processos SET visto_em=? WHERE numero IN "
-                        "(SELECT numero FROM processo_advogada WHERE advogada_id=?)", (db.agora(), advogada))
+            con.execute("UPDATE processos SET visto_em=%s WHERE numero IN "
+                        "(SELECT numero FROM processo_advogada WHERE advogada_id=%s)", (db.agora(), advogada))
         else:
-            con.execute("UPDATE processos SET visto_em=?", (db.agora(),))
+            con.execute("UPDATE processos SET visto_em=%s", (db.agora(),))
     return {"ok": True}
 
 
 @app.post("/api/processos/{numero}/atualizar")
 def atualizar_um(numero: str):
-    return sincronizador.atualizar_um(_numero(numero))
+    return sync.atualizar_um(_numero(numero))
 
 
 @app.delete("/api/processos/{numero}")
@@ -164,7 +172,7 @@ def adicionar(dados: Adicionar):
             db.recalcular_resumo(con, n)
     consultando = False
     if novos:
-        consultando = sincronizador.iniciar(djen=False, datajud=True, numeros=novos) or sincronizador.rodando()
+        consultando = sync.iniciar(djen=False, datajud=True, numeros=novos) or sync.rodando()
     log.info("Adicionados %d processos (%d já existiam, %d inválidos)", len(novos), len(existentes), len(invalidos))
     return {
         "encontrados": len(numeros), "novos": [cnj.formatar(n) for n in novos],
@@ -174,13 +182,19 @@ def adicionar(dados: Adicionar):
 
 @app.post("/api/sync")
 def iniciar_sync():
-    iniciou = sincronizador.iniciar(djen=True, datajud=True)
-    return {"iniciou": iniciou, "sync": sincronizador.status()}
+    """Começa (ou retoma) a atualização; a tela chama /api/sync/passo até acabar."""
+    iniciou = sync.iniciar(djen=True, datajud=True)
+    return {"iniciou": iniciou, "sync": sync.status()}
+
+
+@app.post("/api/sync/passo")
+def passo_sync():
+    return sync.passo()
 
 
 @app.get("/api/sync")
 def status_sync():
-    return sincronizador.status()
+    return sync.status()
 
 
 class AdvogadaEditavel(BaseModel):
@@ -206,36 +220,34 @@ class Configuracao(BaseModel):
 
 @app.get("/api/config")
 def ler_config():
-    cfg = config.carregar()
+    with db.conexao() as con:
+        cfg = config.efetiva(con)
+        advogadas = db.advogadas(con)
     chave = cfg["datajud_api_key"]
     return {"tem_chave": bool(chave), "chave_final": chave[-6:] if chave else "", "backfill_dias": cfg["backfill_dias"],
-            "oab": f"{cfg['oab_numero']}/{cfg['oab_uf']}", "nome": cfg["nome_advogado"], "advogadas": cfg["advogadas"],
-            "ocultar_cooperacao": cfg["ocultar_cooperacao"], "advogados_cooperacao": cfg["advogados_cooperacao"]}
+            "advogadas": advogadas, "ocultar_cooperacao": cfg["ocultar_cooperacao"],
+            "advogados_cooperacao": cfg["advogados_cooperacao"]}
 
 
 @app.post("/api/config")
 def salvar_config(dados: Configuracao):
-    cfg = config.carregar(com_env=False)  # não grava no arquivo uma chave que veio do .env
-    if dados.datajud_api_key is not None:
-        cfg["datajud_api_key"] = config.normalizar_chave(dados.datajud_api_key)
-    if dados.backfill_dias is not None:
-        cfg["backfill_dias"] = max(1, min(int(dados.backfill_dias), 730))
-    for ed in dados.advogadas or []:
-        for a in cfg["advogadas"]:
-            if (a["oab_numero"], a["oab_uf"]) == (ed.oab_numero.strip(), ed.oab_uf.strip().upper()):
-                if ed.nome and ed.nome.strip():
-                    a["nome"] = ed.nome.strip()
-                if ed.cor and re.fullmatch(r"#[0-9a-fA-F]{6}", ed.cor):
-                    a["cor"] = ed.cor
-    if dados.ocultar_cooperacao is not None:
-        cfg["ocultar_cooperacao"] = dados.ocultar_cooperacao
-    lista_antes = cfg["advogados_cooperacao"]
-    if dados.advogados_cooperacao is not None:
-        cfg["advogados_cooperacao"] = [a.model_dump() for a in dados.advogados_cooperacao]
-    config.salvar(cfg)
-    novo = config.carregar(com_env=False)["advogados_cooperacao"]
-    if novo != lista_antes:  # lista mudou: refaz a marcação automática de todos os processos
-        with db.conexao() as con:
-            log.info("Advogados de cooperação alterados: %d processo(s) em cooperação",
-                     db.atualizar_cooperacao(con, lista=novo))
+    """Ajustes da tela: ficam no banco (no servidor não dá para gravar o config.json)."""
+    with db.conexao() as con:
+        if dados.datajud_api_key is not None:
+            config.ajustar(con, datajud_api_key=config.normalizar_chave(dados.datajud_api_key))
+        if dados.backfill_dias is not None:
+            config.ajustar(con, backfill_dias=max(1, min(int(dados.backfill_dias), 730)))
+        for ed in dados.advogadas or []:
+            nome = (ed.nome or "").strip()
+            cor = ed.cor if ed.cor and re.fullmatch(r"#[0-9a-fA-F]{6}", ed.cor) else None
+            con.execute("""UPDATE advogadas SET nome=COALESCE(NULLIF(%s, ''), nome), cor=COALESCE(%s, cor)
+                           WHERE oab_numero=%s AND oab_uf=%s""", (nome, cor, ed.oab_numero.strip(), ed.oab_uf.strip().upper()))
+        if dados.ocultar_cooperacao is not None:
+            config.ajustar(con, ocultar_cooperacao=dados.ocultar_cooperacao)
+        if dados.advogados_cooperacao is not None:
+            antes = config.cooperacao(con)
+            novo = config.salvar_cooperacao(con, [a.model_dump() for a in dados.advogados_cooperacao])
+            if novo != antes:  # lista mudou: refaz a marcação automática de todos os processos
+                log.info("Advogados de cooperação alterados: %d processo(s) em cooperação",
+                         db.atualizar_cooperacao(con, lista=novo))
     return ler_config()

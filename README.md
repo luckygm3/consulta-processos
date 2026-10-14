@@ -1,41 +1,172 @@
 # Meus processos
 
-Página única, local e gratuita, com todos os processos das advogadas (uma ou mais OABs) em todos os tribunais.
-Roda só no seu computador (http://127.0.0.1:8000). Sem login, sem nuvem, sem certificado digital.
+Os processos das advogadas (uma ou mais OABs) em todos os tribunais, com prazos, clientes, agenda e financeiro.
+Os dados ficam no **Supabase** (banco Postgres na nuvem) e só entra quem faz **login com e-mail e senha** e está
+cadastrada como advogada (hoje: Beatriz e Kazuza). O app roda no computador (http://127.0.0.1:8000) ou hospedado na
+**Vercel** (um endereço https para abrir de qualquer lugar, inclusive no celular). Os dois podem ser usados ao mesmo
+tempo, porque o banco é o mesmo. Não precisa de certificado digital.
 
-## Instalar num computador novo (Windows)
+## Como funciona
 
-1. Na página do repositório no GitHub, clique em **Code → Download ZIP**.
-2. Clique com o botão direito no ZIP baixado → **Extrair tudo…** e escolha uma pasta (ex.: Documentos).
-   Não rode direto de dentro do ZIP.
-3. Abra a pasta extraída e dê dois cliques em **`run.bat`**.
-   - Se o Windows mostrar “O Windows protegeu o computador”, clique em **Mais informações → Executar assim mesmo**.
-   - Se o computador não tiver Python, o `run.bat` pergunta se pode instalar: responda **S** e aguarde.
-4. Na primeira vez ele prepara tudo (1–3 min, precisa de internet) e abre o navegador em http://127.0.0.1:8000.
-5. Clique em **Atualizar tudo**. A primeira busca (últimos 180 dias) leva uns 5 minutos.
+```
+navegador ── login (e-mail e senha, chave pública "anon") ──► Supabase Auth
+   │ token da sessão em cada chamada
+   ▼
+app (FastAPI: run.py no computador, ou função na Vercel) ── confere o token ──► Supabase Auth
+   │ conecta como "authenticated", com o token de quem está logada
+   ▼
+Postgres do Supabase ── RLS: só as advogadas cadastradas leem e gravam
+```
 
-(Quem tem git pode usar `git clone` em vez do ZIP.)
+- A tela só conhece a URL do projeto e a chave pública **anon** (feita para ficar no navegador).
+- A senha do banco (`DATABASE_URL`) fica só no servidor (`.env` ou variáveis da Vercel). A chave `service_role`
+  (secret) não é usada em lugar nenhum.
+- **RLS em todas as tabelas**: as duas advogadas veem e editam tudo; qualquer outra conta, mesmo logada, não vê nada
+  (a tela mostra “Esta conta não tem acesso”). O filtro por advogada continua sendo da tela, não de permissão.
 
-## Instalar num Mac
+## 1. Criar o projeto no Supabase (uma vez só)
 
-1. **Instale o Python (uma vez só):** abra https://www.python.org/downloads/, clique no botão amarelo
-   “Download Python 3.x”, abra o arquivo `.pkg` baixado e siga o instalador (ele pede a senha do Mac).
-   O Python que já vem no Mac é antigo demais e não serve.
-2. No GitHub, clique em **Code → Download ZIP**. O Safari normalmente já descompacta; se não, dê dois cliques no ZIP.
-   Mova a pasta para **Documentos** (para não se perder na pasta Downloads).
-3. Abra a pasta e dê dois cliques em **`abrir-no-mac.command`**.
-   - Na primeira vez o Mac bloqueia (“não pode ser aberto porque é de um desenvolvedor não identificado” ou
-     “a Apple não pôde verificar…”). Clique em **OK/Concluído**, vá em **Ajustes do Sistema → Privacidade e Segurança**,
-     role até o fim e clique em **Abrir Mesmo Assim** (no macOS 14 ou anterior, também funciona Control+clique
-     no arquivo → **Abrir** → **Abrir**). Depois disso, os dois cliques funcionam direto.
-   - Se preferir evitar o aviso: abra o app **Terminal**, digite `sh ` (com um espaço no fim), arraste o arquivo
-     `run.sh` da pasta para dentro da janela do Terminal e aperte Enter.
-4. Na primeira vez ele prepara tudo (1–3 min) e abre o navegador em http://127.0.0.1:8000. Clique em **Atualizar tudo**.
+1. Crie uma conta em https://supabase.com e clique em **New project**. Nome: `processos`. **Database Password**:
+   gere uma senha forte e guarde (vai no `.env`). **Region**: *South America (São Paulo)*.
+   Nas opções de segurança: **desmarque “Enable Data API”** (o app não usa a API REST automática: a tela só usa o
+   login, e o servidor fala direto com o banco; desligada, a chave anon não abre caminho nenhum até as tabelas) e
+   **marque “Enable automatic RLS”** (rede de proteção: tabela nova já nasce com RLS). “Automatically expose new
+   tables” só aparece com a Data API ligada; se ligar a Data API um dia, deixe essa desmarcada.
+2. **SQL Editor → New query**: cole o arquivo [`supabase/schema.sql`](supabase/schema.sql) inteiro e clique em
+   **Run**. Ele cria as tabelas, a RLS (políticas) e os gatilhos. Pode rodar de novo sem estragar nada: é assim que
+   se aplica uma versão nova do schema.
+3. **Authentication → Sign In / Providers**: deixe **Email** ligado e **desligue “Allow new users to sign up”**
+   (ninguém cria conta sozinho).
+4. **Authentication → Users → Add user → Create new user**: e-mail e senha da Beatriz, com **Auto Confirm User**
+   marcado. Repita para a Kazuza. (Cada uma pode trocar a senha depois em “Esqueci minha senha”.)
+5. **Authentication → URL Configuration**: em *Site URL*, o endereço do app (o da Vercel, quando existir; até lá,
+   `http://127.0.0.1:8000`). Em *Redirect URLs*, adicione `http://127.0.0.1:8000/**`, `http://localhost:8000/**` e,
+   quando existir, `https://SEU-APP.vercel.app/**`. É para onde leva o link do e-mail “Esqueci minha senha”.
+6. **Quem pode entrar** = tabela `advogadas` com o e-mail do login. **Com a migração** (seção 3), o `--email` já faz
+   isso. **Sem migração** (banco novo, do zero), rode no SQL Editor, com os e-mails de verdade:
+   ```sql
+   insert into public.advogadas (nome, oab_numero, oab_uf, cor, email) values
+     ('Beatriz Daffara', '130678', 'PR', '#41ecb9', 'email-da-beatriz@exemplo.com'),
+     ('Kazuza',          '130152', 'PR', '#c144ee', 'email-da-kazuza@exemplo.com')
+   on conflict (oab_numero, oab_uf) do update set email = excluded.email;
+   ```
+   O login é ligado à advogada pelo e-mail, sozinho, quando o e-mail é cadastrado ou quando a conta é criada (o que
+   vier por último).
+7. **Connect** (botão no topo do projeto) ou **Project Settings → API Keys**: copie a *Project URL*, a chave pública
+   (**anon**, ou a nova *publishable*) e as *connection strings* **Transaction pooler** (porta 6543) e
+   **Session pooler** (porta 5432), trocando `[YOUR-PASSWORD]` pela senha do passo 1. Elas vão no `.env`.
 
-## Como rodar no dia a dia
+## 2. Configurar o `.env`
 
-**Windows:** dois cliques em `run.bat`. **Mac:** dois cliques em `abrir-no-mac.command`. **Linux:** `sh run.sh`.
-O navegador abre sozinho. **Deixe a janela preta (Terminal) aberta** enquanto usa o app; para encerrar, feche-a.
+Copie `.env.example` para `.env` (na mesma pasta do app) e preencha:
+
+| variável | o que é | quem usa |
+|---|---|---|
+| `SUPABASE_URL` | Project URL (`https://….supabase.co`) | tela (login) e servidor |
+| `SUPABASE_ANON_KEY` | chave pública anon/publishable | tela (login) e servidor |
+| `DATABASE_URL` | connection string *Transaction pooler* (porta 6543) | servidor |
+| `MIGRACAO_DATABASE_URL` | connection string *Session pooler* (porta 5432) | só o script de migração |
+| `DATAJUD_API_KEY` | opcional: chave do DataJud (tem prioridade sobre a salva em ⚙) | servidor |
+
+O `.env` está no `.gitignore`: **nunca** vai para o GitHub. Não cole a `service_role`/secret key em lugar nenhum.
+
+## 3. Migrar os dados atuais (uma vez só)
+
+O script copia tudo do banco antigo (`db/processos.sqlite3`) para o Supabase: processos, publicações, movimentos,
+tarefas e checklists, clientes, lançamentos, parcelas e pagamentos, feriados, tipos de ato, equipe, ajustes da tela e
+advogados de cooperação. Os ids são mantidos, então os vínculos continuam iguais. As checklists, que eram JSON dentro
+da tarefa ou do card, viram linhas da tabela `checklist_itens`.
+
+1. Faça a seção 1 (passos 1–5) e o `.env`. Use o computador onde o app rodava (onde está a pasta `db/`) e abra o
+   `run.bat` uma vez, para criar o ambiente `.venv` (ele vai avisar se faltar algo no `.env`).
+2. Simule. Faz tudo, confere e desfaz (troque pelos e-mails de login reais):
+   ```
+   .venv\Scripts\python scripts\migrar_para_supabase.py --simular --email 130678/PR=email-da-beatriz@exemplo.com --email 130152/PR=email-da-kazuza@exemplo.com
+   ```
+   (no Mac/Linux: `.venv/bin/python scripts/migrar_para_supabase.py …`)
+3. Se terminar com “tudo conferido”, rode o mesmo comando **sem** `--simular`.
+
+- É tudo numa transação só. A conferência compara tabela por tabela, os itens de checklist e a soma das parcelas: se
+  algo falhar ou não bater, nada fica gravado no Supabase.
+- Só roda com o Supabase vazio, para não duplicar nada (ou com `--substituir`, abaixo).
+- O arquivo SQLite não é alterado. Guarde a pasta `db/` como backup.
+
+### Trazer os dados de outro computador
+
+Quando quem usa a versão antiga no dia a dia é outro computador, os dados **dele** é que precisam ir para o
+Supabase, e isso deve acontecer **antes** da troca de versão lá. O `git pull` não apaga nada: a pasta `db` e o
+`config.json` daquele computador nunca vão para o git. Mas a versão nova só mostra o que está no Supabase.
+
+1. No computador dela, **feche o app** (a janela preta). A partir daqui, ninguém usa mais a versão antiga.
+2. Copie a **pasta `db` inteira** e o **`config.json`** (por ZIP, pendrive ou Drive). A pasta inteira é necessária
+   porque o que foi registrado por último pode estar só no `processos.sqlite3-wal`. Guarde também uma cópia de
+   segurança.
+3. No computador que tem o `.env`, extraia **fora da pasta do projeto** (ex.: `C:\dados-beatriz\`) e simule:
+   ```
+   .venv\Scripts\python scripts\migrar_para_supabase.py --simular --substituir --sqlite C:\dados-beatriz\db\processos.sqlite3 --config C:\dados-beatriz\config.json --email 130678/PR=EMAIL-DA-BEATRIZ --email 130152/PR=EMAIL-DA-KAZUZA
+   ```
+   `--substituir` troca o que já estiver no Supabase (ex.: uma migração de teste) pelo conteúdo desse banco, numa
+   transação só: se algo falhar ou não conferir, o Supabase fica como estava. Cuidado: ele apaga também o que já
+   tiver sido cadastrado direto na versão nova.
+4. Conferido (“tudo conferido”), rode o mesmo comando **sem** `--simular`.
+5. Só então, no computador dela: `git pull` (ou o ZIP novo numa pasta nova), o `.env` e o `run.bat`. Ou ela passa a
+   usar o endereço da Vercel.
+
+**Aviso automático.** A migração guarda no Supabase uma “impressão digital” do banco copiado. O app novo, rodando num
+computador que ainda tem a pasta `db`, compara com ela. Se o conteúdo for diferente (banco que não foi migrado, cópia
+feita sem o `-wal` ou a versão antiga usada depois da migração), aparece uma faixa vermelha em todas as telas. Nesse
+caso, não apague a pasta: refaça a migração com o banco atualizado. Num computador cujos dados não importam (de
+teste), renomeie a pasta `db` para `db-antigo` e a faixa some.
+
+Nunca rode `git clean -x` (ou `-X`) na pasta do app: ele apaga os arquivos ignorados pelo git, e a pasta `db` é um
+deles.
+
+## 4. Rodar no computador
+
+1. Baixe o código: no GitHub, **Code → Download ZIP** e extraia numa pasta (ex.: Documentos). Não rode de dentro do
+   ZIP. Quem tem git pode usar `git clone`.
+2. Coloque o `.env` na pasta (seção 2).
+3. **Windows:** dois cliques em **`run.bat`**. Se aparecer “O Windows protegeu o computador”, clique em
+   **Mais informações → Executar assim mesmo**. Se não houver Python, o `run.bat` pergunta se pode instalar:
+   responda **S**.
+   **Mac:** instale o Python de https://www.python.org/downloads/ (o que vem no Mac é antigo demais) e dê dois cliques
+   em **`abrir-no-mac.command`**. Na primeira vez o Mac bloqueia: vá em **Ajustes do Sistema → Privacidade e
+   Segurança**, role até o fim e clique em **Abrir Mesmo Assim**. Outra opção é abrir o Terminal, digitar `sh ` e
+   arrastar o `run.sh` para a janela.
+   **Linux:** `sh run.sh`.
+4. Na primeira vez ele prepara tudo (1–3 min, precisa de internet) e abre http://127.0.0.1:8000 na tela de login.
+   **Deixe a janela preta (Terminal) aberta** enquanto usa; para encerrar, feche-a.
+
+## 5. Hospedar na Vercel
+
+1. Com o código no GitHub (o `.env` não vai junto), entre em https://vercel.com → **Add New → Project** e importe o
+   repositório. *Framework Preset*: **Other**. Não precisa mexer em build nem output: o `vercel.json` já configura
+   a função Python (`api/index.py`), a região São Paulo (`gru1`) e até 60 s por requisição.
+2. Em **Environment Variables**, coloque `SUPABASE_URL`, `SUPABASE_ANON_KEY` e `DATABASE_URL` (*Transaction pooler*,
+   porta 6543). `DATAJUD_API_KEY` é opcional; `MIGRACAO_DATABASE_URL` não é usada lá.
+3. **Deploy**. Abra `https://SEU-APP.vercel.app` e entre.
+4. No Supabase, em **Authentication → URL Configuration**, coloque esse endereço em *Site URL* e em *Redirect URLs*.
+
+Cada `git push` na `main` publica sozinho uma versão nova. Mudou o `supabase/schema.sql`? Rode-o de novo no SQL
+Editor antes (ou junto) do deploy.
+
+- **Atualizar tudo** roda em passos de até ~45 s (por causa do limite da Vercel), e a tela encadeia os passos sozinha.
+  O ponto onde parou fica no banco: fechar a aba só pausa, e “Atualizar tudo” continua dali. Se duas abas clicarem
+  ao mesmo tempo, uma acompanha a outra.
+- A região `gru1` (São Paulo) é importante: o DJEN e o DataJud às vezes recusam acessos de fora do Brasil.
+- Erros de rede e dos tribunais: no computador, em `logs/app.log`; na Vercel, em **Project → Logs**.
+- Planos: o *Hobby* (grátis) da Vercel é para uso pessoal e não comercial; para o escritório, o indicado é o *Pro*.
+  No Supabase, o plano *Free* pausa o projeto depois de uma semana sem nenhum acesso (reative no painel).
+
+## Acesso e senhas
+
+- **Sair**: botão no pé do menu lateral (mostra o e-mail de quem está logada).
+- **Esqueci minha senha** (na tela de login): chega um e-mail com um link; ao voltar pelo link, a tela pede a senha
+  nova. Pelo painel: **Authentication → Users → ⋯ → Send password recovery**.
+- **Incluir uma advogada**: crie a usuária (seção 1, passo 4) e cadastre a linha dela em `advogadas` (passo 6). A
+  OAB dela passa a ser buscada no DJEN na próxima atualização.
+- **Tirar o acesso**: `update public.advogadas set email = null where oab_numero = '…';` ou apague a usuária em
+  Authentication → Users. Os processos dela continuam no banco.
 
 ## Chave do DataJud
 
@@ -45,9 +176,10 @@ para todo mundo; **a atual já vem no `config.json`**. O CNJ troca a chave de te
 
 1. Abra https://datajud-wiki.cnj.jus.br/api-publica/acesso
 2. Copie o texto que aparece depois de `APIKey` (uma sequência longa terminada em `==`).
-3. No app, clique em **⚙** → cole em “Chave pública do DataJud” → **Salvar**.
+3. No app, clique em **⚙** → cole em “Chave pública do DataJud” → **Salvar**. Fica guardada no banco e vale no
+   computador e na Vercel.
 
-(Alternativa: criar um arquivo `.env` com `DATAJUD_API_KEY=...`, que tem prioridade sobre o `config.json`.)
+(Alternativa: `DATAJUD_API_KEY=...` no `.env` ou nas variáveis da Vercel, que tem prioridade sobre as outras.)
 
 O DJEN (publicações) não precisa de chave.
 
@@ -211,24 +343,39 @@ ou o lançamento de onde ele veio; dois cliques num dia criam uma tarefa de moni
 7. Prazo em horas é convertido em dias corridos e marcado para conferência. Prazo em dobro não é aplicado
    automaticamente (só um aviso quando o texto menciona).
 
-Testes do cálculo e da detecção: `.venv\Scripts\python -m unittest discover -s tests -t . -v`
-(no Mac/Linux: `.venv/bin/python -m unittest discover -s tests -t . -v`).
+Testes do cálculo e da detecção: veja a seção **Testes**.
 
-## Configuração (`config.json`)
+## Testes
+
+```
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\python -m unittest discover -s tests -t . -v
+```
+
+(no Mac/Linux: `.venv/bin/python …`). O `requirements-dev.txt` instala o **pgserver**, um Postgres local onde os
+testes montam um “Supabase de mentira” (papéis `anon`/`authenticated`, `auth.users`, `auth.uid()`) e rodam o
+`supabase/schema.sql` de verdade. Assim testam também a RLS, a migração e a sincronização em passos, sem tocar no
+Supabase real. Sem o pgserver, os testes de banco são pulados.
+
+## Configuração
+
+O que muda pela tela (**⚙**) fica guardado no banco e vale em qualquer lugar onde o app rode: nome e cor das
+advogadas, chave do DataJud, dias da primeira busca, ocultar processos em cooperação, lista de advogados de
+cooperação e equipe. Quem pode entrar (e-mail e OAB das advogadas) só muda pelo SQL Editor (seção 1, passo 6).
+
+O `config.json` guarda os padrões:
 
 | campo | significado |
 |---|---|
-| `advogadas` | lista de quem é buscado no DJEN: `nome`, `oab_numero`, `oab_uf`, `cor` (nome e cor também mudam em ⚙). O formato antigo (`oab_numero`, `oab_uf`, `nome_advogado` soltos) continua aceito |
-| `datajud_api_key` | chave pública do DataJud |
-| `backfill_dias` | quantos dias buscar na primeira atualização (padrão 180) |
+| `datajud_api_key` | chave pública do DataJud (padrão; a salva em ⚙ e a `DATAJUD_API_KEY` do ambiente têm prioridade) |
+| `backfill_dias` | quantos dias buscar na primeira atualização (padrão 180; também em ⚙) |
 | `janela_dias` | tamanho de cada consulta ao DJEN (padrão 30) |
 | `buscar_tambem_por_nome` | também busca por nome, além da OAB (padrão `false`; nos testes os resultados foram iguais). Só vale para nomes com nome e sobrenome |
 | `porta` | porta local (padrão 8000) |
 | `prazos_regra_publicacao` | `"djen"` (publicação = 1º dia útil após a disponibilização, padrão) ou `"disponibilizacao"` |
 | `prazos_dias_internos` | data interna sugerida: quantos dias úteis antes do prazo fatal (padrão 2) |
 | `prazos_contagem_padrao` | `"uteis"` (padrão) ou `"corridos"` |
-| `ocultar_cooperacao` | `true` (padrão) esconde os processos em cooperação; `false` mostra (também muda em ⚙) |
-| `advogados_cooperacao` | advogados de cooperação: `nome`, `oab_numero`, `oab_uf` (padrão: Jessica Delmoni, 13043/AL; edite em ⚙) |
+| `advogadas` | só para a migração: lista usada se o banco antigo não tiver a tabela de advogadas |
 
 ## Limitações
 
@@ -240,26 +387,35 @@ Testes do cálculo e da detecção: `.venv\Scripts\python -m unittest discover -
   tribunal de origem.
 - STF e conselhos (CNJ, CJF, CSJT) não publicam no DataJud.
 - As duas APIs são públicas e às vezes ficam lentas ou sobrecarregadas (erros 429/500/504). O app repete a consulta
-  automaticamente; o que falhar aparece em “problemas nesta atualização” e é tentado de novo na próxima vez.
+  automaticamente. Um lote que não responde em 3 passos seguidos aparece em “problemas nesta atualização” e é tentado
+  de novo na próxima vez.
   Sob carga, o DataJud às vezes responde “pela metade” (parte do índice falha); nesse caso o processo **não** é marcado
   como sem dados, e sim como “não respondeu por completo”, e é consultado de novo na próxima atualização.
-- Uma atualização completa leva de 3 a 6 minutos (o DataJud demora de 5 a 40 s por consulta).
+- Uma atualização completa leva de 3 a 6 minutos (o DataJud demora de 5 a 40 s por consulta); com o DataJud
+  sobrecarregado, mais.
 - O DataJud não informa nomes das partes; elas vêm das publicações do DJEN.
 
 ## Arquivos
 
 ```
-app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py, db.py, texto.py, main.py;
+app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py (atualização em passos), db.py (Postgres),
+            auth.py (confere o login), tempo.py (limite de tempo dos passos), texto.py, main.py,
+            banco_antigo.py (lê o SQLite antigo com o -wal e avisa se ele tem dados fora do Supabase);
             agenda: prazos.py (calendário e cálculo), extrair.py (regex), agenda.py, rotas_agenda.py;
             quadro de clientes: quadro.py (inclui aniversários), rotas_quadro.py; checklist.py (itens, "feito" e equipe);
             financeiro: financeiro.py, rotas_financeiro.py
-static/     interface (HTML/CSS/JS puro; app.js = Andamentos e menu lateral; agenda.js = Monitoramento;
+static/     interface (HTML/CSS/JS puro; auth.js = login; app.js = Andamentos e menu lateral; agenda.js = Monitoramento;
             quadro.js = Clientes; calendario.js = Agenda; financeiro.js = Financeiro;
             checklist.js = editor de checklist reutilizável)
-tests/      testes do cálculo de prazos, da detecção no texto, da agenda, do quadro e do financeiro
-db/         banco SQLite (processos.sqlite3) — apague para recomeçar do zero; não vai para o git.
-            Antes de mudar a estrutura do banco, o app guarda uma cópia (processos.sqlite3.bak-AAAAMMDD)
-logs/       app.log (erros de rede e dos tribunais)
-config.json configuração editável
+supabase/   schema.sql: tabelas, RLS e gatilhos (colar no SQL Editor)
+scripts/    migrar_para_supabase.py: copia o banco antigo (SQLite) para o Supabase
+api/        index.py: entrada da Vercel (o vercel.json manda tudo para ela)
+tests/      testes do cálculo de prazos, da detecção no texto, da agenda, do quadro, do financeiro, do acesso (RLS),
+            da migração e da sincronização
+db/         banco antigo (SQLite), de antes do Supabase: só a origem da migração e backup; não vai para o git
+            (renomeie para db-antigo num computador cujos dados não importam, para não ver o aviso vermelho)
+logs/       app.log (erros de rede e dos tribunais), só quando roda no computador
+.env        chaves e senha do banco (copie de .env.example); nunca vai para o git
+config.json padrões editáveis
 checklists_padrao.txt  checklists padrão por modelo: [processo] e [preventivo] (um item por linha)
 ```

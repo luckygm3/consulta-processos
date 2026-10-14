@@ -1,236 +1,156 @@
-"""Banco SQLite local: processos, publicações (DJEN), movimentos (DataJud), advogadas e metadados."""
+"""Banco: Postgres do Supabase (schema em supabase/schema.sql).
+
+Cada requisição usa uma transação que assume o papel "authenticated" com os dados (claims) da usuária logada,
+então as políticas de RLS valem também para o backend: sem usuária logada não há acesso (conexao() recusa).
+Datas, horas e JSON voltam do banco como texto ("AAAA-MM-DD", "HH:MM", "AAAA-MM-DDTHH:MM:SS", JSON cru), no
+mesmo formato que o resto do código sempre usou.
+"""
+import contextvars
 import hashlib
 import json
 import logging
-import sqlite3
+import os
+import re
+import threading
 import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime
 
-from . import cnj, config, texto as txt
-from .config import DB_DIR, DB_PATH
+import psycopg
+from psycopg.adapt import Loader
+from psycopg_pool import ConnectionPool
+
+from . import FUSO, cnj, config, texto as txt
 
 log = logging.getLogger("db")
-SCHEMA_VERSAO = 8  # 2 = várias advogadas; 3 = agenda/prazos; 4 = concluídos com restaurar; 5 = checklist com datas;
-#                   6 = financeiro e aniversários; 7 = pagamentos parciais e cliente inadimplente;
-#                   8 = processos em cooperação
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS processos (
-    numero            TEXT PRIMARY KEY,      -- 20 dígitos
-    tribunal          TEXT,
-    alias             TEXT,                  -- índice do DataJud (ex.: tjpr)
-    origem            TEXT,                  -- 'djen' ou 'manual'
-    orgao             TEXT,
-    classe            TEXT,
-    assuntos          TEXT,                  -- JSON (lista de nomes)
-    grau              TEXT,
-    data_ajuizamento  TEXT,
-    sistema           TEXT,
-    instancias        TEXT,                  -- JSON com um resumo por grau retornado pelo DataJud
-    partes            TEXT,                  -- JSON {"ativo": [...], "passivo": [...], "outros": [...]}
-    datajud_status    TEXT,                  -- NULL, ok, sem_dados, erro, sem_alias
-    datajud_msg       TEXT,
-    datajud_em        TEXT,
-    ult_mov_data      TEXT,
-    ult_mov_texto     TEXT,
-    ult_pub_data      TEXT,
-    ult_pub_texto     TEXT,
-    ult_atividade     TEXT,
-    novidade_em       TEXT,                  -- quando algo novo foi capturado
-    visto_em          TEXT,                  -- quando a advogada marcou como visto
-    busca             TEXT,                  -- texto normalizado para busca
-    criado_em         TEXT,
-    cooperacao        INTEGER NOT NULL DEFAULT 0, -- 1 = consta advogado de cooperação (marcado a cada sincronização)
-    cooperacao_manual INTEGER                -- marcação à mão (1/0), vale por cima da automática; NULL = automática
-);
-CREATE TABLE IF NOT EXISTS comunicacoes (
-    hash              TEXT PRIMARY KEY,
-    djen_id           INTEGER,
-    numero            TEXT NOT NULL,
-    tribunal          TEXT,
-    orgao             TEXT,
-    tipo              TEXT,
-    tipo_documento    TEXT,
-    classe            TEXT,
-    data_disp         TEXT,                  -- YYYY-MM-DD
-    texto             TEXT,                  -- texto limpo (sem HTML)
-    texto_original    TEXT,                  -- original do DJEN, só quando era diferente
-    link              TEXT,
-    destinatarios     TEXT,                  -- JSON
-    advogados         TEXT,                  -- JSON
-    busca             TEXT,
-    capturado_em      TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_com_numero ON comunicacoes(numero, data_disp);
-CREATE TABLE IF NOT EXISTS movimentos (
-    chave             TEXT PRIMARY KEY,
-    numero            TEXT NOT NULL,
-    grau              TEXT,
-    codigo            INTEGER,
-    data_hora         TEXT,
-    nome              TEXT,
-    complementos      TEXT,
-    orgao             TEXT,
-    capturado_em      TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_mov_numero ON movimentos(numero, data_hora);
-CREATE TABLE IF NOT EXISTS meta (
-    chave             TEXT PRIMARY KEY,
-    valor             TEXT
-);
-CREATE TABLE IF NOT EXISTS sync_erros (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    sync_id           TEXT,
-    quando            TEXT,
-    fonte             TEXT,
-    tribunal          TEXT,
-    mensagem          TEXT
-);
-CREATE TABLE IF NOT EXISTS advogadas (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    oab_numero        TEXT NOT NULL,
-    oab_uf            TEXT NOT NULL,
-    nome              TEXT,
-    cor               TEXT,
-    UNIQUE(oab_numero, oab_uf)
-);
-CREATE TABLE IF NOT EXISTS processo_advogada (     -- N:N: um processo pode ser de mais de uma advogada
-    numero            TEXT NOT NULL,
-    advogada_id       INTEGER NOT NULL,
-    origem            TEXT,                  -- 'djen', 'manual' ou 'migracao'
-    criado_em         TEXT,
-    PRIMARY KEY (numero, advogada_id)
-);
-CREATE INDEX IF NOT EXISTS ix_pa_advogada ON processo_advogada(advogada_id);
-CREATE TABLE IF NOT EXISTS comunicacao_advogada (  -- qual busca por OAB trouxe cada publicação
-    hash              TEXT NOT NULL,
-    advogada_id       INTEGER NOT NULL,
-    PRIMARY KEY (hash, advogada_id)
-);
-CREATE TABLE IF NOT EXISTS feriados (            -- calendário forense editável (feriados, suspensões, recesso)
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    inicio            TEXT NOT NULL,         -- YYYY-MM-DD (ou MM-DD se recorrente)
-    fim               TEXT,                  -- idem; NULL = um dia só
-    descricao         TEXT NOT NULL,
-    tipo              TEXT NOT NULL,         -- feriado | suspensao | recesso | expediente_reduzido
-    tribunais         TEXT,                  -- siglas separadas por vírgula; vazio = todos
-    comarca           TEXT,                  -- vazio = todas; senão casa com o nome do órgão do processo
-    recorrente        INTEGER DEFAULT 0,     -- 1 = repete todo ano (datas em MM-DD)
-    origem            TEXT,                  -- 'padrao' (pré-preenchido, conferir) ou 'manual'
-    ativo             INTEGER DEFAULT 1
-);
-CREATE INDEX IF NOT EXISTS ix_feriados_inicio ON feriados(inicio);
-CREATE TABLE IF NOT EXISTS tipos_ato (           -- tabela editável: palavras-chave -> nome do ato e prazo padrão
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    ordem             INTEGER,
-    nome              TEXT NOT NULL,
-    palavras          TEXT NOT NULL,         -- separadas por ';' (comparadas sem acento e em minúsculas)
-    dias              INTEGER,
-    contagem          TEXT,                  -- uteis | corridos
-    justica           TEXT,                  -- vazio = qualquer; 'trabalho' = só TRT/TST
-    ativo             INTEGER DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS tarefas (             -- cartões da agenda/kanban
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    titulo            TEXT NOT NULL,
-    tipo              TEXT DEFAULT 'tarefa', -- prazo | tarefa | audiencia
-    status            TEXT DEFAULT 'a_fazer',-- sugerido | a_fazer | andamento | aguardando | concluido | descartado
-    numero            TEXT,                  -- processo vinculado (opcional)
-    advogada_id       INTEGER,               -- responsável (NULL = as duas / a definir)
-    prazo_fatal       TEXT,
-    data_interna      TEXT,
-    hora              TEXT,                  -- audiências
-    prioridade        TEXT DEFAULT 'media',  -- alta | media | baixa
-    observacoes       TEXT,
-    checklist         TEXT,                  -- JSON [{"id", "texto", "feito", "data", "hora", "resp"}] (ver checklist.py)
-    origem            TEXT DEFAULT 'manual', -- manual | djen | sigilo
-    comunicacao_hash  TEXT,
-    trecho            TEXT,                  -- trecho da publicação que gerou a sugestão
-    calculo           TEXT,                  -- JSON: memória de cálculo
-    conferir          INTEGER DEFAULT 0,     -- 1 = detecção incerta, conferir manualmente
-    aviso             TEXT,
-    criado_em         TEXT,
-    atualizado_em     TEXT,
-    concluido_em      TEXT,
-    status_anterior   TEXT                   -- coluna de onde saiu ao ser concluída (para restaurar)
-);
-CREATE INDEX IF NOT EXISTS ix_tarefas_status ON tarefas(status, prazo_fatal);
-CREATE TABLE IF NOT EXISTS tarefas_geradas (     -- tarefas automáticas já criadas: não recria, mesmo se excluída
-    chave             TEXT PRIMARY KEY,      -- ex.: sigilo:<numero>:<segunda-feira da semana>
-    criado_em         TEXT
-);
-CREATE TABLE IF NOT EXISTS quadro_colunas (      -- quadro de clientes: 5 colunas fixas, nomeadas por ela na tela
-    id                INTEGER PRIMARY KEY,
-    posicao           INTEGER NOT NULL,
-    nome              TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS quadro_cards (        -- cards de cliente do quadro
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    coluna_id         INTEGER NOT NULL,
-    posicao           INTEGER NOT NULL DEFAULT 0,
-    titulo            TEXT NOT NULL,
-    tipo              TEXT NOT NULL DEFAULT 'processo', -- processo | inicial (petição inicial) | preventivo (consultoria)
-    numero            TEXT,                  -- processo vinculado (só quando tipo = processo)
-    checklist         TEXT,                  -- JSON [{"id", "texto", "feito", "data", "hora", "resp"}]
-    criado_em         TEXT,
-    atualizado_em     TEXT,
-    prazo_descricao   TEXT,                  -- prazo fatal interno (cards sem processo); o processual vem da agenda
-    prazo_data        TEXT,
-    prazo_hora        TEXT,
-    aniversario       TEXT                   -- AAAA-MM-DD; gera "Parabenizar <cliente>" todo ano na Agenda
-);
-CREATE INDEX IF NOT EXISTS ix_quadro_cards ON quadro_cards(coluna_id, posicao);
-CREATE TABLE IF NOT EXISTS pessoas (             -- responsáveis nos itens da checklist, além das advogadas
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome              TEXT NOT NULL,
-    ativo             INTEGER DEFAULT 1,     -- 0 = removida da lista (itens antigos ainda mostram o nome)
-    criado_em         TEXT
-);
-CREATE TABLE IF NOT EXISTS comunicacao_analise ( -- publicações já varridas por "Verificar prazos" (não duplica)
-    hash              TEXT PRIMARY KEY,
-    analisado_em      TEXT,
-    resultado         TEXT,                  -- prazo | sem_prazo | ja_vencido | erro
-    detalhe           TEXT
-);
-CREATE TABLE IF NOT EXISTS lancamentos (         -- financeiro: um contrato de honorários (entrada + parcelas)
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    cliente           TEXT NOT NULL,         -- nome por extenso
-    numero            TEXT,                  -- processo vinculado (opcional)
-    valor_total       INTEGER NOT NULL,      -- valores em centavos (sem erro de arredondamento)
-    entrada           INTEGER NOT NULL DEFAULT 0,
-    entrada_data      TEXT,
-    valor_parcela     INTEGER NOT NULL DEFAULT 0,
-    qtd_parcelas      INTEGER NOT NULL DEFAULT 0,
-    observacoes       TEXT,
-    inadimplente      INTEGER NOT NULL DEFAULT 0, -- 1 = fora da renda do mês (continua no total a receber)
-    criado_em         TEXT,
-    atualizado_em     TEXT
-);
-CREATE TABLE IF NOT EXISTS parcelas (            -- entrada (numero 0) e parcelas (1..n) de cada lançamento
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    lancamento_id     INTEGER NOT NULL,
-    numero            INTEGER NOT NULL,
-    vencimento        TEXT NOT NULL,         -- AAAA-MM-DD (o lembrete no calendário cai no dia seguinte)
-    valor             INTEGER NOT NULL,      -- centavos
-    pago              INTEGER NOT NULL DEFAULT 0, -- resumo da tabela pagamentos: 1 = quitada (pago >= valor)
-    pago_em           TEXT                   -- data do pagamento que quitou
-);
-CREATE INDEX IF NOT EXISTS ix_parcelas ON parcelas(lancamento_id, numero);
-CREATE INDEX IF NOT EXISTS ix_parcelas_venc ON parcelas(vencimento);
-CREATE TABLE IF NOT EXISTS pagamentos (           -- histórico de pagamentos (parciais ou não) de cada parcela
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    parcela_id        INTEGER NOT NULL,
-    valor             INTEGER NOT NULL,      -- centavos
-    data              TEXT NOT NULL,         -- AAAA-MM-DD
-    criado_em         TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_pagamentos ON pagamentos(parcela_id);
-CREATE TABLE IF NOT EXISTS lembretes_feitos (    -- lembretes calculados (ex.: aniversário) marcados como feitos
-    chave             TEXT PRIMARY KEY,      -- ex.: aniv:<card>:<ano>
-    feito_em          TEXT
-);
-"""
+# --- conexão ---------------------------------------------------------------------
+
+_usuaria: contextvars.ContextVar[dict | None] = contextvars.ContextVar("usuaria", default=None)
+
+
+def definir_usuaria(claims: dict | None):
+    """Quem está fazendo a requisição (claims do token do Supabase). Devolve o token para resetar o contexto."""
+    return _usuaria.set(claims)
+
+
+def esquecer_usuaria(ctx) -> None:
+    _usuaria.reset(ctx)
+
+
+def usuaria_atual() -> dict | None:
+    return _usuaria.get()
+
+
+class _Texto(Loader):
+    def load(self, data):
+        return bytes(data).decode()
+
+
+class _Hora(Loader):
+    def load(self, data):
+        return bytes(data).decode()[:5]  # "13:55:00" -> "13:55"
+
+
+class _Momento(Loader):
+    """timestamp/timestamptz -> "AAAA-MM-DDTHH:MM:SS" no horário de Brasília (o fuso da sessão), sem fração nem fuso."""
+    def load(self, data):
+        s = bytes(data).decode().replace(" ", "T", 1)
+        return re.sub(r"(\.\d+)?([+-]\d{2}(:\d{2})?)?$", "", s)
+
+
+class Linha(dict):
+    """Linha do resultado: por nome (linha["numero"]) e por posição (linha[0])."""
+    __slots__ = ("_valores",)
+
+    def __getitem__(self, chave):
+        return self._valores[chave] if isinstance(chave, int) else dict.__getitem__(self, chave)
+
+
+def _linhas(cursor):
+    nomes = [c.name for c in cursor.description] if cursor.description else []
+
+    def fazer(valores):
+        linha = Linha(zip(nomes, valores))
+        linha._valores = valores
+        return linha
+    return fazer
+
+
+def preparar(con: psycopg.Connection) -> None:
+    """Ajustes de leitura de tipos (vale para conexões do app, dos testes e do script de migração)."""
+    for tipo in ("date", "json", "jsonb"):
+        con.adapters.register_loader(tipo, _Texto)
+    con.adapters.register_loader("time", _Hora)
+    for tipo in ("timestamp", "timestamptz"):
+        con.adapters.register_loader(tipo, _Momento)
+    con.row_factory = _linhas
+
+
+class Conexao:
+    """Fina camada sobre a conexão do psycopg: execute/executemany com placeholders %s."""
+    def __init__(self, con: psycopg.Connection):
+        self.bruta = con
+
+    def execute(self, sql, params=None):
+        return self.bruta.execute(sql, params)
+
+    def executemany(self, sql, seq):
+        cur = self.bruta.cursor()
+        cur.executemany(sql, list(seq))
+        return cur
+
+
+_pool: ConnectionPool | None = None
+_pool_trava = threading.Lock()
+
+
+def _pool_aberto() -> ConnectionPool:
+    """Pool aberto na primeira consulta. prepare_threshold=None: o pooler do Supabase (modo transação) não aceita
+    prepared statements."""
+    global _pool
+    with _pool_trava:
+        if _pool is None:
+            _pool = ConnectionPool(
+                config.ambiente("DATABASE_URL"), min_size=1, max_size=int(config.ambiente("DB_POOL_MAX", False) or 4),
+                kwargs={"prepare_threshold": None, "autocommit": False}, configure=preparar, open=True, timeout=30,
+                name="processos")
+        return _pool
+
+
+def entrar(con: psycopg.Connection, claims: dict) -> None:
+    """Início de cada transação: papel "authenticated" + claims da usuária (RLS) + fuso de Brasília.
+    set_config(..., true) vale só até o fim da transação, o que é seguro com o pooler em modo transação."""
+    con.execute("SELECT set_config('role', 'authenticated', true), set_config('request.jwt.claims', %s, true),"
+                " set_config('TimeZone', %s, true)", (json.dumps(claims), os.environ.get("FUSO_BANCO") or FUSO))
+
+
+@contextmanager
+def conexao():
+    claims = _usuaria.get()
+    if not claims:
+        raise PermissionError("Acesso ao banco sem usuária logada")
+    with _pool_aberto().connection() as bruta:
+        try:
+            entrar(bruta, claims)
+            yield Conexao(bruta)
+            bruta.commit()
+        except BaseException:
+            bruta.rollback()
+            raise
+
+
+@contextmanager
+def savepoint(con):
+    """Isola a gravação de um item: se der erro, desfaz só ele e o resto da transação segue."""
+    con.execute("SAVEPOINT item")
+    try:
+        yield
+    except Exception:
+        con.execute("ROLLBACK TO SAVEPOINT item")
+        con.execute("RELEASE SAVEPOINT item")
+        raise
+    con.execute("RELEASE SAVEPOINT item")
 
 
 def agora() -> str:
@@ -243,108 +163,22 @@ def normalizar(texto: str) -> str:
     return "".join(c for c in t if not unicodedata.combining(c)).lower()
 
 
-def iniciar():
-    DB_DIR.mkdir(exist_ok=True)
-    _backup_antes_de_migrar()
-    with conexao() as con:
-        con.executescript(SCHEMA)
-        _migrar(con)
+def autorizada(con) -> bool:
+    return bool(con.execute("SELECT public.e_autorizada()").fetchone()[0])
 
 
-def _versao(con) -> int:
-    """Versão da estrutura do banco. Bancos de antes das advogadas não têm a chave: são v1."""
-    tem_meta = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-    if not tem_meta:
-        return SCHEMA_VERSAO  # banco recém-criado
-    return int(meta_get(con, "schema_versao", 1))
+# --- padrões que o app cria sozinho (tipos de ato, feriados dos próximos anos) -----------
 
-
-def _backup_antes_de_migrar():
-    """Copia o banco (processos.sqlite3.bak-AAAAMMDD) antes de mudar a estrutura. Nunca sobrescreve um backup."""
-    if not DB_PATH.exists():
-        return
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    try:
-        tem_processos = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='processos'").fetchone()
-        if not tem_processos or _versao(con) >= SCHEMA_VERSAO:
-            return
-        destino = DB_PATH.with_name(f"{DB_PATH.name}.bak-{datetime.now():%Y%m%d}")
-        if destino.exists():
-            destino = destino.with_name(f"{destino.name}-{datetime.now():%H%M%S}")
-        bak = sqlite3.connect(destino)
-        try:
-            con.backup(bak)  # API de backup do SQLite: cópia consistente, inclui o que ainda está no WAL
-        finally:
-            bak.close()
-        log.info("Backup do banco antes da migração: %s", destino)
-    finally:
-        con.close()
-
-
-def _migrar(con):
-    versao = _versao(con)
-    if versao < 2:
-        _migrar_v2(con)
-    if versao < 3:
-        # v2 -> v3 (agenda): contagem de prazo por processo (NULL = padrão) e tabela de tipos de ato
-        colunas = [r["name"] for r in con.execute("PRAGMA table_info(processos)")]
-        if "contagem" not in colunas:
-            con.execute("ALTER TABLE processos ADD COLUMN contagem TEXT")
+def garantir_padroes(con, hoje: date | None = None):
+    if not con.execute("SELECT 1 FROM tipos_ato LIMIT 1").fetchone():
         from .extrair import TIPOS_PADRAO
-        if not con.execute("SELECT 1 FROM tipos_ato LIMIT 1").fetchone():
-            con.executemany("INSERT INTO tipos_ato(ordem, nome, palavras, dias, contagem, justica) VALUES(?,?,?,?,?,?)",
-                            [(i, *t) for i, t in enumerate(TIPOS_PADRAO, start=1)])
-        log.info("Migração do banco: agenda e prazos")
-    if versao < 4:
-        # v3 -> v4: concluídas guardam a coluna de origem, para "Restaurar" devolver ao mesmo lugar
-        if "status_anterior" not in [r["name"] for r in con.execute("PRAGMA table_info(tarefas)")]:
-            con.execute("ALTER TABLE tarefas ADD COLUMN status_anterior TEXT")
-        log.info("Migração do banco: concluídos com restaurar")
-    if versao < 5:
-        # v4 -> v5: itens da checklist ganham id (a agenda marca "feito" pelo id), data, hora e responsável;
-        # cards do quadro ganham prazo fatal interno
-        colunas = [r["name"] for r in con.execute("PRAGMA table_info(quadro_cards)")]
-        for col in ("prazo_descricao", "prazo_data", "prazo_hora"):
-            if col not in colunas:
-                con.execute(f"ALTER TABLE quadro_cards ADD COLUMN {col} TEXT")
-        from .checklist import ler
-        for tabela in ("tarefas", "quadro_cards"):
-            for r in list(con.execute(f"SELECT id, checklist FROM {tabela} WHERE checklist IS NOT NULL AND checklist != ''")):
-                con.execute(f"UPDATE {tabela} SET checklist=? WHERE id=?",
-                            (json.dumps(ler(r["checklist"]), ensure_ascii=False), r["id"]))
-        log.info("Migração do banco: checklist com datas e responsáveis")
-    if versao < 6:
-        # v5 -> v6: financeiro (tabelas novas, criadas pelo SCHEMA) e aniversário do cliente no card do quadro
-        if "aniversario" not in [r["name"] for r in con.execute("PRAGMA table_info(quadro_cards)")]:
-            con.execute("ALTER TABLE quadro_cards ADD COLUMN aniversario TEXT")
-        log.info("Migração do banco: financeiro e aniversários")
-    if versao < 7:
-        # v6 -> v7: pagamentos parciais (tabela nova, criada pelo SCHEMA; cada parcela já paga vira um pagamento do
-        # valor cheio na data em que foi paga) e "cliente inadimplente" no lançamento
-        if "inadimplente" not in [r["name"] for r in con.execute("PRAGMA table_info(lancamentos)")]:
-            con.execute("ALTER TABLE lancamentos ADD COLUMN inadimplente INTEGER NOT NULL DEFAULT 0")
-        con.execute("""INSERT INTO pagamentos(parcela_id, valor, data, criado_em)
-                       SELECT id, valor, COALESCE(pago_em, vencimento), ? FROM parcelas
-                       WHERE pago=1 AND valor > 0 AND id NOT IN (SELECT parcela_id FROM pagamentos)""", (agora(),))
-        log.info("Migração do banco: pagamentos parciais e cliente inadimplente")
-    if versao < 8:
-        # v7 -> v8: processos em cooperação (marcação automática pelos advogados das publicações + marcação à mão)
-        colunas = [r["name"] for r in con.execute("PRAGMA table_info(processos)")]
-        if "cooperacao" not in colunas:
-            con.execute("ALTER TABLE processos ADD COLUMN cooperacao INTEGER NOT NULL DEFAULT 0")
-        if "cooperacao_manual" not in colunas:
-            con.execute("ALTER TABLE processos ADD COLUMN cooperacao_manual INTEGER")
-        log.info("Migração do banco: %d processo(s) em cooperação", atualizar_cooperacao(con))
-    if versao < SCHEMA_VERSAO:
-        meta_set(con, "schema_versao", str(SCHEMA_VERSAO))
-    semear_feriados(con)
-    semear_quadro(con)
-
-
-def semear_quadro(con):
-    """Quadro de clientes: 5 colunas que nascem sem nome (ela nomeia na tela). Não mexe nas que já existem."""
-    con.executemany("INSERT OR IGNORE INTO quadro_colunas(id, posicao, nome) VALUES(?, ?, '')", [(i, i) for i in range(1, 6)])
+        con.executemany("INSERT INTO tipos_ato(ordem, nome, palavras, dias, contagem, justica) VALUES(%s,%s,%s,%s,%s,%s)",
+                        [(i, *t) for i, t in enumerate(TIPOS_PADRAO, start=1)])
+    if not meta_get(con, "cooperacao_semeada"):  # lista inicial de cooperação, uma vez só (o que ela tirar não volta)
+        if not con.execute("SELECT 1 FROM advogados_cooperacao LIMIT 1").fetchone():
+            config.salvar_cooperacao(con, config.cooperacao_do_arquivo())
+        meta_set(con, "cooperacao_semeada", agora())
+    semear_feriados(con, hoje)
 
 
 def semear_feriados(con, hoje: date | None = None):
@@ -358,79 +192,28 @@ def semear_feriados(con, hoje: date | None = None):
             continue
         con.executemany(
             """INSERT INTO feriados(inicio, fim, descricao, tipo, tribunais, comarca, recorrente, origem)
-               VALUES(:inicio, :fim, :descricao, :tipo, :tribunais, :comarca, :recorrente, :origem)""",
-            feriados_padrao(a))
+               VALUES(%(inicio)s, %(fim)s, %(descricao)s, %(tipo)s, %(tribunais)s, %(comarca)s, %(recorrente)s, %(origem)s)""",
+            [{**f, "recorrente": bool(f["recorrente"])} for f in feriados_padrao(a)])
         meta_set(con, chave, agora())
-
-
-def _migrar_v2(con):
-    """v1 -> v2: tudo o que já existia passa a ser da primeira advogada (a OAB que estava configurada)."""
-    lista = advogadas(con)
-    if lista:
-        dona = lista[0]
-        con.execute("""INSERT OR IGNORE INTO processo_advogada(numero, advogada_id, origem, criado_em)
-                       SELECT numero, ?, 'migracao', criado_em FROM processos""", (dona["id"],))
-        con.execute("INSERT OR IGNORE INTO comunicacao_advogada(hash, advogada_id) SELECT hash, ? FROM comunicacoes",
-                    (dona["id"],))
-        # O marco do DJEN era único; agora é por advogada (as novas começam do zero, com o backfill)
-        ultima = meta_get(con, "djen_ultima_data")
-        if ultima and not meta_get(con, chave_marco(dona)):
-            meta_set(con, chave_marco(dona), ultima)
-        qtd = con.execute("SELECT COUNT(*) FROM processo_advogada WHERE advogada_id=?", (dona["id"],)).fetchone()[0]
-        log.info("Migração do banco: %d processos vinculados a %s", qtd, dona["nome"])
-
-
-@contextmanager
-def savepoint(con):
-    """Isola a gravação de um item: se der erro, desfaz só ele e o resto da transação segue."""
-    con.execute("SAVEPOINT item")
-    try:
-        yield
-    except Exception:
-        con.execute("ROLLBACK TO item")
-        con.execute("RELEASE item")
-        raise
-    con.execute("RELEASE item")
-
-
-@contextmanager
-def conexao():
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
-    try:
-        yield con
-        con.commit()
-    finally:
-        con.close()
 
 
 # --- meta ------------------------------------------------------------------
 
 def meta_get(con, chave, padrao=None):
-    row = con.execute("SELECT valor FROM meta WHERE chave=?", (chave,)).fetchone()
+    row = con.execute("SELECT valor FROM meta WHERE chave=%s", (chave,)).fetchone()
     return row["valor"] if row else padrao
 
 
 def meta_set(con, chave, valor):
-    con.execute("INSERT INTO meta(chave, valor) VALUES(?, ?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
+    con.execute("INSERT INTO meta(chave, valor) VALUES(%s, %s) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
                 (chave, valor))
 
 
 # --- advogadas -------------------------------------------------------------
 
 def advogadas(con) -> list[dict]:
-    """Advogadas do config.json com o id do banco (cria ou atualiza nome/cor, casando pelo número da OAB)."""
-    saida = []
-    for a in config.carregar(com_env=False)["advogadas"]:
-        con.execute("""INSERT INTO advogadas(oab_numero, oab_uf, nome, cor) VALUES(?,?,?,?)
-                       ON CONFLICT(oab_numero, oab_uf) DO UPDATE SET nome=excluded.nome, cor=excluded.cor
-                       WHERE nome IS NOT excluded.nome OR cor IS NOT excluded.cor""",
-                    (a["oab_numero"], a["oab_uf"], a["nome"], a["cor"]))
-        r = con.execute("SELECT id FROM advogadas WHERE oab_numero=? AND oab_uf=?",
-                        (a["oab_numero"], a["oab_uf"])).fetchone()
-        saida.append({**a, "id": r["id"]})
-    return saida
+    """Advogadas cadastradas (tabela advogadas; quem entra no app e de quem são os processos)."""
+    return [dict(r) for r in con.execute("SELECT id, nome, oab_numero, oab_uf, cor FROM advogadas ORDER BY id")]
 
 
 def chave_marco(adv: dict) -> str:
@@ -439,15 +222,15 @@ def chave_marco(adv: dict) -> str:
 
 
 def vincular(con, numero: str, advogada_id: int, origem: str):
-    con.execute("INSERT OR IGNORE INTO processo_advogada(numero, advogada_id, origem, criado_em) VALUES(?,?,?,?)",
-                (numero, advogada_id, origem, agora()))
+    con.execute("""INSERT INTO processo_advogada(numero, advogada_id, origem, criado_em) VALUES(%s,%s,%s,%s)
+                   ON CONFLICT DO NOTHING""", (numero, advogada_id, origem, agora()))
 
 
 # --- processos em cooperação ------------------------------------------------
-# Processo em que consta um dos advogados de cooperação do config.json (de fora do escritório). A marcação
-# automática (processos.cooperacao) é refeita a cada sincronização; cooperacao_manual vale por cima dela.
+# Processo em que consta um dos advogados de cooperação (tabela advogados_cooperacao, de fora do escritório).
+# A marcação automática (processos.cooperacao) é refeita a cada sincronização; cooperacao_manual vale por cima dela.
 
-COOPERACAO_SQL = "COALESCE(cooperacao_manual, cooperacao, 0)"  # 1 = em cooperação (manual ou automática)
+COOPERACAO_SQL = "COALESCE(cooperacao_manual, cooperacao)"  # true = em cooperação (manual ou automática)
 
 
 def _oab(numero) -> str:
@@ -474,12 +257,12 @@ def cooperacao_de(con, numero: str, lista: list[dict]) -> dict | None:
     """O advogado de cooperação que consta no processo (advogados das publicações do DJEN ou partes), ou None."""
     if not lista:
         return None
-    for r in con.execute("SELECT advogados FROM comunicacoes WHERE numero=?", (numero,)):
+    for r in con.execute("SELECT advogados FROM comunicacoes WHERE numero=%s", (numero,)):
         for adv in json.loads(r["advogados"] or "[]"):
             achado = next((c for c in lista if isinstance(adv, dict) and _casa_advogado(adv, c)), None)
             if achado:
                 return achado
-    p = con.execute("SELECT partes FROM processos WHERE numero=?", (numero,)).fetchone()
+    p = con.execute("SELECT partes FROM processos WHERE numero=%s", (numero,)).fetchone()
     nomes = [n for ns in json.loads(p["partes"]).values() for n in ns] if p and p["partes"] else []
     return next((c for c in lista if c["nome"] and any(_mesmo_nome(n, c["nome"]) for n in nomes)), None)
 
@@ -487,23 +270,23 @@ def cooperacao_de(con, numero: str, lista: list[dict]) -> dict | None:
 def atualizar_cooperacao(con, numero: str | None = None, lista: list[dict] | None = None) -> int:
     """Refaz a marcação automática de um processo (ou de todos). Retorna quantos ficaram marcados."""
     if lista is None:
-        lista = config.carregar(com_env=False)["advogados_cooperacao"]
+        lista = config.cooperacao(con)
     numeros = [numero] if numero else [r[0] for r in con.execute("SELECT numero FROM processos")]
     marcados = 0
     for n in numeros:
         sim = cooperacao_de(con, n, lista) is not None
         marcados += sim
-        con.execute("UPDATE processos SET cooperacao=? WHERE numero=?", (1 if sim else 0, n))
+        con.execute("UPDATE processos SET cooperacao=%s WHERE numero=%s", (sim, n))
     return marcados
 
 
 def marcar_cooperacao(con, numero: str, valor: bool | None) -> bool:
     """Marcação à mão. Igual à automática (ou None) volta a seguir a automática."""
-    r = con.execute("SELECT cooperacao FROM processos WHERE numero=?", (numero,)).fetchone()
+    r = con.execute("SELECT cooperacao FROM processos WHERE numero=%s", (numero,)).fetchone()
     if not r:
         return False
-    manual = None if valor is None or bool(valor) == bool(r["cooperacao"]) else (1 if valor else 0)
-    con.execute("UPDATE processos SET cooperacao_manual=? WHERE numero=?", (manual, numero))
+    manual = None if valor is None or bool(valor) == bool(r["cooperacao"]) else bool(valor)
+    con.execute("UPDATE processos SET cooperacao_manual=%s WHERE numero=%s", (manual, numero))
     return True
 
 
@@ -513,17 +296,16 @@ def garantir_processo(con, numero: str, origem: str) -> bool:
     """Cria o processo se não existir. Retorna True se foi criado agora."""
     sigla, alias = cnj.tribunal(numero)
     cur = con.execute(
-        "INSERT OR IGNORE INTO processos(numero, tribunal, alias, origem, criado_em, novidade_em) VALUES(?,?,?,?,?,?)",
+        """INSERT INTO processos(numero, tribunal, alias, origem, criado_em, novidade_em) VALUES(%s,%s,%s,%s,%s,%s)
+           ON CONFLICT DO NOTHING""",
         (numero, sigla, alias, origem, agora(), agora()),
     )
     return cur.rowcount > 0
 
 
 def remover_processo(con, numero: str):
-    con.execute("DELETE FROM comunicacao_advogada WHERE hash IN (SELECT hash FROM comunicacoes WHERE numero=?)",
-                (numero,))
-    for tabela in ("comunicacoes", "movimentos", "processo_advogada", "processos"):
-        con.execute(f"DELETE FROM {tabela} WHERE numero=?", (numero,))
+    """Publicações, movimentos e vínculos com advogadas saem junto (on delete cascade)."""
+    con.execute("DELETE FROM processos WHERE numero=%s", (numero,))
 
 
 # --- DJEN ------------------------------------------------------------------
@@ -556,11 +338,12 @@ def salvar_comunicacao(con, item: dict, advogada_id: int | None = None) -> bool:
     texto = txt.limpar(bruto)
     busca = normalizar(" ".join([texto, " ".join(d.get("nome", "") for d in destinatarios)]))
     chave = _hash_comunicacao(item)
+    garantir_processo(con, numero, "djen")
     cur = con.execute(
-        """INSERT OR IGNORE INTO comunicacoes
+        """INSERT INTO comunicacoes
            (hash, djen_id, numero, tribunal, orgao, tipo, tipo_documento, classe, data_disp, texto, texto_original,
             link, destinatarios, advogados, busca, capturado_em)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
         (
             chave, item.get("id"), numero, item.get("siglaTribunal"), item.get("nomeOrgao"),
             item.get("tipoComunicacao"), item.get("tipoDocumento"), item.get("nomeClasse"),
@@ -570,13 +353,13 @@ def salvar_comunicacao(con, item: dict, advogada_id: int | None = None) -> bool:
         ),
     )
     nova = cur.rowcount > 0
-    garantir_processo(con, numero, "djen")
     if advogada_id is not None:
-        con.execute("INSERT OR IGNORE INTO comunicacao_advogada(hash, advogada_id) VALUES(?,?)", (chave, advogada_id))
+        con.execute("INSERT INTO comunicacao_advogada(hash, advogada_id) VALUES(%s,%s) ON CONFLICT DO NOTHING",
+                    (chave, advogada_id))
         vincular(con, numero, advogada_id, "djen")
     if nova:
         _mesclar_partes(con, numero, _partes_de(destinatarios))
-        con.execute("UPDATE processos SET novidade_em=? WHERE numero=?", (agora(), numero))
+        con.execute("UPDATE processos SET novidade_em=%s WHERE numero=%s", (agora(), numero))
     return nova
 
 
@@ -589,33 +372,41 @@ def resumo_partes(partes_json: str | None) -> str:
 
 
 def _mesclar_partes(con, numero, novas: dict):
-    row = con.execute("SELECT partes FROM processos WHERE numero=?", (numero,)).fetchone()
+    row = con.execute("SELECT partes FROM processos WHERE numero=%s", (numero,)).fetchone()
     atuais = json.loads(row["partes"]) if row and row["partes"] else {"ativo": [], "passivo": [], "outros": []}
     for polo, nomes in novas.items():
         for n in nomes:
             if n not in atuais.setdefault(polo, []):
                 atuais[polo].append(n)
-    con.execute("UPDATE processos SET partes=? WHERE numero=?", (json.dumps(atuais, ensure_ascii=False), numero))
+    con.execute("UPDATE processos SET partes=%s WHERE numero=%s", (json.dumps(atuais, ensure_ascii=False), numero))
 
 
 # --- DataJud ---------------------------------------------------------------
 
 def _data_ajuizamento(valor: str | None) -> str | None:
-    """DataJud mistura '20260513163404' e ISO; devolve 'YYYY-MM-DD'."""
+    """DataJud mistura '20260513163404' e ISO; devolve 'YYYY-MM-DD' (ou None se vier algo que não é data)."""
     if not valor:
         return None
     v = str(valor)
     if v[:8].isdigit() and (len(v) == 8 or v[8:9].isdigit()):
-        return f"{v[0:4]}-{v[4:6]}-{v[6:8]}"
-    return v[:10]
+        v = f"{v[0:4]}-{v[4:6]}-{v[6:8]}"
+    try:
+        return date.fromisoformat(v[:10]).isoformat()
+    except ValueError:
+        return None
 
 
-def _data_hora_mov(valor: str | None) -> str:
+def _data_hora_mov(valor: str | None) -> str | None:
     """Datas dos movimentos vêm como ISO com 'Z', mas na prática estão no horário local do tribunal."""
     v = str(valor or "")
     if v[:14].isdigit():
-        return f"{v[0:4]}-{v[4:6]}-{v[6:8]}T{v[8:10]}:{v[10:12]}:{v[12:14]}"
-    return v.replace("Z", "")[:19]
+        v = f"{v[0:4]}-{v[4:6]}-{v[6:8]}T{v[8:10]}:{v[10:12]}:{v[12:14]}"
+    v = v.replace("Z", "")[:19]
+    try:
+        datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    return v
 
 
 def _complementos_texto(mov: dict) -> str:
@@ -658,13 +449,13 @@ def salvar_datajud(con, numero: str, hits: list[dict], completo: bool = True) ->
     ]
     graus = [s.get("grau") for s in fontes]
     if not completo:
-        row = con.execute("SELECT instancias FROM processos WHERE numero=?", (numero,)).fetchone()
+        row = con.execute("SELECT instancias FROM processos WHERE numero=%s", (numero,)).fetchone()
         anteriores = json.loads(row["instancias"]) if row and row["instancias"] else []
         instancias += [i for i in anteriores if i.get("grau") not in graus]
 
     antigos = {r["chave"]: r["capturado_em"]
-               for r in con.execute("SELECT chave, capturado_em FROM movimentos WHERE numero=?", (numero,))}
-    novos_movs = []
+               for r in con.execute("SELECT chave, capturado_em FROM movimentos WHERE numero=%s", (numero,))}
+    novos_movs = {}
     for s in fontes:
         grau = s.get("grau")
         for m in s.get("movimentos") or []:
@@ -672,21 +463,21 @@ def salvar_datajud(con, numero: str, hits: list[dict], completo: bool = True) ->
             comp = _complementos_texto(m)
             chave = hashlib.sha1(f"{numero}|{grau}|{m.get('codigo')}|{data_hora}|{m.get('nome')}|{comp}".encode()).hexdigest()
             nome = m.get("nome") or f"Movimento {m.get('codigo') or ''}".strip()
-            novos_movs.append((chave, numero, grau, m.get("codigo"), data_hora, nome, comp,
-                               (m.get("orgaoJulgador") or {}).get("nome"), antigos.get(chave) or agora()))
-    qtd_novos = len({m[0] for m in novos_movs} - set(antigos))
+            novos_movs.setdefault(chave, (chave, numero, grau, m.get("codigo"), data_hora, nome, comp,
+                                          (m.get("orgaoJulgador") or {}).get("nome"), antigos.get(chave) or agora()))
+    qtd_novos = len(set(novos_movs) - set(antigos))
 
     # Substitui os movimentos pelo retrato atual do DataJud (evita lixo se o tribunal corrigir algo)
     if completo:
-        con.execute("DELETE FROM movimentos WHERE numero=?", (numero,))
+        con.execute("DELETE FROM movimentos WHERE numero=%s", (numero,))
     else:
-        marcas = ",".join("?" * len(graus))
-        con.execute(f"DELETE FROM movimentos WHERE numero=? AND grau IN ({marcas})", (numero, *graus))
-    con.executemany("INSERT OR IGNORE INTO movimentos VALUES (?,?,?,?,?,?,?,?,?)", novos_movs)
+        con.execute("DELETE FROM movimentos WHERE numero=%s AND grau = ANY(%s)", (numero, graus))
+    con.executemany("""INSERT INTO movimentos(chave, numero, grau, codigo, data_hora, nome, complementos, orgao, capturado_em)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""", novos_movs.values())
 
     con.execute(
-        """UPDATE processos SET orgao=?, classe=?, assuntos=?, grau=?, data_ajuizamento=?, sistema=?, instancias=?,
-           datajud_status='ok', datajud_msg=NULL, datajud_em=? WHERE numero=?""",
+        """UPDATE processos SET orgao=%s, classe=%s, assuntos=%s, grau=%s, data_ajuizamento=%s, sistema=%s, instancias=%s,
+           datajud_status='ok', datajud_msg=NULL, datajud_em=%s WHERE numero=%s""",
         (
             (principal.get("orgaoJulgador") or {}).get("nome"), (principal.get("classe") or {}).get("nome"),
             json.dumps(assuntos, ensure_ascii=False), principal.get("grau"),
@@ -695,18 +486,18 @@ def salvar_datajud(con, numero: str, hits: list[dict], completo: bool = True) ->
         ),
     )
     if qtd_novos:
-        con.execute("UPDATE processos SET novidade_em=? WHERE numero=?", (agora(), numero))
+        con.execute("UPDATE processos SET novidade_em=%s WHERE numero=%s", (agora(), numero))
     return qtd_novos
 
 
 def marcar_datajud(con, numero: str, status: str, msg: str | None = None):
     if status == "erro":
         # Falha temporária não apaga dados já obtidos: mantém 'ok' e só guarda a mensagem
-        con.execute("""UPDATE processos SET datajud_msg=?,
-                       datajud_status=CASE WHEN datajud_status='ok' THEN 'ok' ELSE 'erro' END WHERE numero=?""",
+        con.execute("""UPDATE processos SET datajud_msg=%s,
+                       datajud_status=CASE WHEN datajud_status='ok' THEN 'ok' ELSE 'erro' END WHERE numero=%s""",
                     (f"Última consulta falhou: {msg}", numero))
         return
-    con.execute("UPDATE processos SET datajud_status=?, datajud_msg=?, datajud_em=? WHERE numero=?",
+    con.execute("UPDATE processos SET datajud_status=%s, datajud_msg=%s, datajud_em=%s WHERE numero=%s",
                 (status, msg, agora(), numero))
 
 
@@ -714,14 +505,15 @@ def marcar_datajud(con, numero: str, status: str, msg: str | None = None):
 
 def recalcular_resumo(con, numero: str):
     """Atualiza colunas de 'última movimentação/publicação', órgão/classe de reserva e texto de busca."""
-    p = con.execute("SELECT * FROM processos WHERE numero=?", (numero,)).fetchone()
+    p = con.execute("SELECT * FROM processos WHERE numero=%s", (numero,)).fetchone()
     if not p:
         return
     mov = con.execute(
-        "SELECT data_hora, nome, complementos FROM movimentos WHERE numero=? ORDER BY data_hora DESC LIMIT 1",
+        "SELECT data_hora, nome, complementos FROM movimentos WHERE numero=%s ORDER BY data_hora DESC NULLS LAST LIMIT 1",
         (numero,)).fetchone()
     pub = con.execute(
-        "SELECT data_disp, tipo, orgao, classe, texto FROM comunicacoes WHERE numero=? ORDER BY data_disp DESC, djen_id DESC LIMIT 1",
+        """SELECT data_disp, tipo, orgao, classe, texto FROM comunicacoes WHERE numero=%s
+           ORDER BY data_disp DESC NULLS LAST, djen_id DESC NULLS LAST LIMIT 1""",
         (numero,)).fetchone()
 
     ult_mov_data = mov["data_hora"] if mov else None
@@ -743,8 +535,8 @@ def recalcular_resumo(con, numero: str):
         " ".join(n for nomes in partes.values() for n in nomes),
     ])))
     con.execute(
-        """UPDATE processos SET ult_mov_data=?, ult_mov_texto=?, ult_pub_data=?, ult_pub_texto=?, ult_atividade=?,
-           orgao=?, classe=?, busca=? WHERE numero=?""",
+        """UPDATE processos SET ult_mov_data=%s, ult_mov_texto=%s, ult_pub_data=%s, ult_pub_texto=%s, ult_atividade=%s,
+           orgao=%s, classe=%s, busca=%s WHERE numero=%s""",
         (ult_mov_data, ult_mov_texto, ult_pub_data, ult_pub_texto, ult_atividade, orgao, classe, busca, numero),
     )
     atualizar_cooperacao(con, numero)
@@ -753,37 +545,37 @@ def recalcular_resumo(con, numero: str):
 # --- consultas para a interface --------------------------------------------
 
 def listar(con, tribunal="", q="", so_novidades=False) -> list[dict]:
-    sql = ["SELECT * FROM processos WHERE 1=1"]
+    sql = ["SELECT * FROM processos WHERE true"]
     args: list = []
     if tribunal:
-        sql.append("AND tribunal=?")
+        sql.append("AND tribunal=%s")
         args.append(tribunal)
     if q:
         termo = normalizar(q).strip()
         digitos = cnj.so_digitos(q)
-        cond = ["busca LIKE ?", "numero IN (SELECT numero FROM comunicacoes WHERE busca LIKE ?)"]
+        cond = ["busca LIKE %s", "numero IN (SELECT numero FROM comunicacoes WHERE busca LIKE %s)"]
         args += [f"%{termo}%", f"%{termo}%"]
         if len(digitos) >= 4 and len(digitos) >= len(q.strip()) * 0.6:
-            cond.append("numero LIKE ?")
+            cond.append("numero LIKE %s")
             args.append(f"%{digitos}%")
         sql.append("AND (" + " OR ".join(cond) + ")")
     if so_novidades:
         sql.append("AND novidade_em IS NOT NULL AND (visto_em IS NULL OR novidade_em > visto_em)")
-    sql.append("ORDER BY ult_atividade IS NULL, ult_atividade DESC, criado_em DESC")
+    sql.append("ORDER BY ult_atividade DESC NULLS LAST, criado_em DESC")
     donas = _advogadas_por_processo(con)
     return [_processo_dict(r, donas) for r in con.execute(" ".join(sql), args)]
 
 
 def _advogadas_por_processo(con, numero: str | None = None) -> dict[str, list[int]]:
     sql = "SELECT numero, advogada_id FROM processo_advogada"
-    linhas = con.execute(sql + " WHERE numero=?", (numero,)) if numero else con.execute(sql)
+    linhas = con.execute(sql + " WHERE numero=%s", (numero,)) if numero else con.execute(sql)
     donas: dict[str, list[int]] = {}
     for r in linhas:
         donas.setdefault(r["numero"], []).append(r["advogada_id"])
     return donas
 
 
-def _processo_dict(r: sqlite3.Row, donas: dict | None = None) -> dict:
+def _processo_dict(r, donas: dict | None = None) -> dict:
     d = dict(r)
     d["advogadas"] = sorted((donas or {}).get(d["numero"], []))
     d.pop("busca", None)
@@ -798,7 +590,7 @@ def _processo_dict(r: sqlite3.Row, donas: dict | None = None) -> dict:
 
 
 def detalhe(con, numero: str) -> dict | None:
-    r = con.execute("SELECT * FROM processos WHERE numero=?", (numero,)).fetchone()
+    r = con.execute("SELECT * FROM processos WHERE numero=%s", (numero,)).fetchone()
     if not r:
         return None
     p = _processo_dict(r, _advogadas_por_processo(con, numero))
@@ -808,21 +600,21 @@ def detalhe(con, numero: str) -> dict | None:
         return bool(visto and capturado and capturado > visto)
 
     eventos = []
-    for c in con.execute("SELECT * FROM comunicacoes WHERE numero=? ORDER BY data_disp DESC", (numero,)):
+    for c in con.execute("SELECT * FROM comunicacoes WHERE numero=%s ORDER BY data_disp DESC", (numero,)):
         eventos.append({
             "fonte": "djen", "data": c["data_disp"], "titulo": c["tipo"] or "Publicação",
             "orgao": c["orgao"], "texto": c["texto"], "link": c["link"], "documento": c["tipo_documento"],
             "resumo": txt.resumo(c["texto"], 360), "novo": novo(c["capturado_em"]),
             "destinatarios": [d.get("nome") for d in json.loads(c["destinatarios"] or "[]") if d.get("nome")],
         })
-    for m in con.execute("SELECT * FROM movimentos WHERE numero=? ORDER BY data_hora DESC", (numero,)):
+    for m in con.execute("SELECT * FROM movimentos WHERE numero=%s ORDER BY data_hora DESC", (numero,)):
         eventos.append({
             "fonte": "datajud", "data": m["data_hora"], "titulo": m["nome"], "complementos": m["complementos"],
             "orgao": m["orgao"], "grau": m["grau"], "novo": novo(m["capturado_em"]),
         })
     eventos.sort(key=lambda e: e["data"] or "", reverse=True)
     p["eventos"] = eventos
-    p["cooperacao_por"] = cooperacao_de(con, numero, config.carregar(com_env=False)["advogados_cooperacao"])
+    p["cooperacao_por"] = cooperacao_de(con, numero, config.cooperacao(con))
     return p
 
 

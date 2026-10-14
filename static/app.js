@@ -3,7 +3,7 @@
 // ---------- utilidades ----------
 const $ = (s) => document.querySelector(s);
 const estado = {
-  processos: [], filtros: { tribunais: [] }, aberto: null, poll: null, aba: "tudo", mostrouFim: false,
+  processos: [], filtros: { tribunais: [] }, aberto: null, sincronizando: false, aba: "tudo", mostrouFim: false,
   advogadas: [], contadores: {}, advogada: lerPreferencia("advogada"), // "" = todas
   pessoas: [], // responsáveis nos itens de checklist: advogadas ("a:<id>") + equipe ("p:<id>")
 };
@@ -56,15 +56,22 @@ function ligarExpandir(botao, memoria, seletor) {
   rotulo();
 }
 
+// Chamada à API com o token do login (auth.js). 401/403 levam de volta à tela de login.
 async function api(url, opcoes = {}) {
-  const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opcoes });
+  const token = await tokenAtual();
+  const r = await fetch(url, {
+    ...opcoes, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
   if (!r.ok) {
     let msg = `Erro ${r.status}`;
     try { msg = (await r.json()).detail || msg; } catch (_) { /* resposta sem JSON */ }
-    throw new Error(msg);
+    if (r.status === 401 || r.status === 403) sessaoRecusada(r.status, msg, token);
+    throw Object.assign(new Error(msg), { status: r.status });
   }
   return r.json();
 }
+
+const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -139,6 +146,7 @@ async function carregarEstado() {
   atualizarCabecalho(); // subtítulo do topo: as OABs nos Andamentos, a descrição da tela nas outras
   $("#ultima").textContent = e.ultima_atualizacao ? `Última atualização: ${fmtDataHora(e.ultima_atualizacao)}` : "Ainda não atualizado";
   $("#aviso-chave").hidden = e.tem_chave;
+  $("#aviso-banco-local").hidden = e.banco_local !== "pendente";
   if (e.sync.rodando) acompanharSync();
   else mostrarResultado(e.sync, false);
 }
@@ -515,42 +523,48 @@ async function atualizarTudo() {
   acompanharSync();
 }
 
-function acompanharSync() {
-  if (estado.poll) return;
+// A atualização roda em passos curtos no servidor (cabe no limite de tempo da Vercel): a tela pede um passo
+// atrás do outro até acabar. Fechar a tela só pausa; "Atualizar tudo" (ou abrir o app de novo) continua.
+async function acompanharSync() {
+  if (estado.sincronizando) return;
+  estado.sincronizando = true;
   $("#progresso").hidden = false;
   $("#resultado-sync").hidden = true;
   const btn = $("#btn-atualizar");
   btn.disabled = true;
   btn.textContent = "Atualizando…";
-  let ciclos = 0;
-  const passo = async () => {
-    let s;
-    try {
-      s = await api("/api/sync");
-    } catch (_) {
-      return; // servidor ocupado: tenta de novo no próximo ciclo
+  let s = null, falhas = 0, passos = 0;
+  try {
+    for (;;) {
+      try {
+        s = await api("/api/sync/passo", { method: "POST" });
+        falhas = 0;
+      } catch (e) {
+        if (e.status === 401 || e.status === 403) break; // voltou para o login; o estado fica salvo para continuar depois
+        if (++falhas >= 5) { toast(`A atualização parou (${e.message}). Clique em Atualizar tudo para continuar.`); break; }
+        await esperar(3000 * falhas);
+        continue;
+      }
+      const pct = s.total ? Math.round((100 * s.atual) / s.total) : 3;
+      $("#prog-fase").textContent = s.fase || "Preparando…";
+      const unidade = s.fase && s.fase.includes("DataJud") ? "processos" : "períodos";
+      $("#prog-conta").textContent = s.total ? `${s.atual} de ${s.total} ${unidade}` : "";
+      $("#prog-barra").style.width = `${Math.max(pct, 3)}%`;
+      $("#prog-msg").textContent = s.ocupado ? "Continuando a atualização iniciada em outra janela…" : s.mensagem || "";
+      if (!s.rodando) break;
+      if (s.ocupado) await esperar(3000);
+      if (++passos % 3 === 0) carregarProcessos(); // mostra processos novos enquanto atualiza
     }
-    const pct = s.total ? Math.round((100 * s.atual) / s.total) : 3;
-    $("#prog-fase").textContent = s.fase || "Preparando…";
-    const unidade = s.fase && s.fase.includes("DataJud") ? "processos" : "períodos";
-    $("#prog-conta").textContent = s.total ? `${s.atual} de ${s.total} ${unidade}` : "";
-    $("#prog-barra").style.width = `${Math.max(pct, 3)}%`;
-    $("#prog-msg").textContent = s.mensagem || "";
-    if (++ciclos % 5 === 0) carregarProcessos(); // mostra processos novos enquanto atualiza
-    if (!s.rodando) {
-      clearInterval(estado.poll);
-      estado.poll = null;
-      $("#progresso").hidden = true;
-      btn.disabled = false;
-      btn.textContent = "⟳ Atualizar tudo";
-      mostrarResultado(s, true);
-      carregarProcessos();
-      carregarEstado();
-      if (estado.aberto) abrirPainel(estado.aberto);
-    }
-  };
-  estado.poll = setInterval(passo, 1000);
-  passo();
+  } finally {
+    estado.sincronizando = false;
+    $("#progresso").hidden = true;
+    btn.disabled = false;
+    btn.textContent = "⟳ Atualizar tudo";
+    if (s && !s.rodando) mostrarResultado(s, true);
+    carregarProcessos();
+    carregarEstado();
+    if (estado.aberto) abrirPainel(estado.aberto);
+  }
 }
 
 function mostrarResultado(s, acabouDeRodar) {
@@ -804,7 +818,13 @@ function ligarEventos() {
   });
 }
 
+// Chamado por auth.js depois do login: carrega os dados e abre a tela lembrada
+function iniciarApp() {
+  carregarPessoas();
+  carregarEstado().catch((e) => toast("Erro: " + e.message));
+  carregarProcessos().catch((e) => toast("Erro: " + e.message));
+  carregarAlertas();
+  mostrarTela(location.hash.slice(1) || lerPreferencia("tela") || "processos");
+}
+
 ligarEventos();
-carregarPessoas();
-carregarEstado().catch((e) => toast("Erro: " + e.message));
-carregarProcessos().catch((e) => toast("Erro: " + e.message));

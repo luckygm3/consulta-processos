@@ -15,6 +15,7 @@ import time
 import httpx
 
 from . import cnj
+from .tempo import TempoEsgotado, cabe, timeout_ate
 
 log = logging.getLogger("datajud")
 
@@ -32,7 +33,9 @@ class DatajudChaveInvalida(DatajudErro):
 
 
 class DatajudClient:
-    def __init__(self, api_key: str, timeout: float = 120.0):
+    def __init__(self, api_key: str, timeout: float = 120.0, prazo: float | None = None):
+        """prazo: time.monotonic() limite (passo da sincronização); passou dele, levanta TempoEsgotado."""
+        self.timeout, self.prazo = timeout, prazo
         if not api_key:
             raise DatajudChaveInvalida("Chave do DataJud não configurada")
         self.http = httpx.Client(
@@ -58,7 +61,7 @@ class DatajudClient:
         teve_parcial = False
         for tentativa, espera in enumerate(ESPERAS, start=1):
             try:
-                r = self.http.post(f"/api_publica_{alias}/_search", json=corpo)
+                r = self.http.post(f"/api_publica_{alias}/_search", json=corpo, timeout=timeout_ate(self.prazo, self.timeout))
             except httpx.HTTPError as e:
                 ultimo_erro = f"falha de rede: {e.__class__.__name__}"
             else:
@@ -85,6 +88,8 @@ class DatajudClient:
                 else:
                     raise DatajudErro(f"HTTP {r.status_code}: {r.text[:200]}")
             log.warning("DataJud %s (tentativa %d): %s; nova tentativa em %ss", alias, tentativa, ultimo_erro, espera)
+            if not cabe(self.prazo, espera + 5):
+                raise TempoEsgotado("DataJud: espera maior que o tempo que sobra neste passo")
             time.sleep(espera)
         if teve_parcial:
             return list(acumulado.values()), False

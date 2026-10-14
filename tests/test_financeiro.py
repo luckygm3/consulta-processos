@@ -1,19 +1,16 @@
 """Testes do financeiro e dos aniversários. Rodar: python -m unittest discover -s tests -t . -v"""
-import sqlite3
 import unittest
 from datetime import date
 
-from app import db, financeiro, quadro
+from app import financeiro, quadro
+from tests.supabase_local import TesteComBanco
 
 HOJE = date(2026, 10, 13)
 
 
-def banco():
-    con = sqlite3.connect(":memory:")
-    con.row_factory = sqlite3.Row
-    con.executescript(db.SCHEMA)
-    db.semear_quadro(con)
-    return con
+class Base(TesteComBanco):
+    def banco(self):
+        return self.conexao()
 
 
 def lancamento(con, **extra):
@@ -39,9 +36,9 @@ class VencimentosTest(unittest.TestCase):
         self.assertEqual(financeiro.gerar_vencimentos(date(2026, 11, 5), 3)[2], date(2027, 1, 5))
 
 
-class LancamentoTest(unittest.TestCase):
+class LancamentoTest(Base):
     def test_gera_entrada_e_parcelas(self):
-        con = banco()
+        con = self.banco()
         l = lancamento(con)
         self.assertEqual([(p["rotulo"], p["vencimento"], p["valor"]) for p in l["parcelas"]], [
             ("Entrada", "2026-09-10", 100000), ("1/4", "2026-09-10", 100000), ("2/4", "2026-10-10", 100000),
@@ -50,12 +47,12 @@ class LancamentoTest(unittest.TestCase):
         self.assertEqual((l["recebido"], l["falta"]), (0, 500000))
 
     def test_conferencia_quando_nao_bate(self):
-        con = banco()
+        con = self.banco()
         l = lancamento(con, valor_parcela=90000)  # 1.000 + 4 x 900 = 4.600; faltam R$ 400 para 5.000
         self.assertEqual(l["diferenca"], 40000)
 
     def test_marcar_paga_recalcula_saldo(self):
-        con = banco()
+        con = self.banco()
         l = lancamento(con)
         entrada, p1 = l["parcelas"][0], l["parcelas"][1]
         financeiro.marcar_paga(con, entrada["id"], True, "2026-09-10")
@@ -67,7 +64,7 @@ class LancamentoTest(unittest.TestCase):
         self.assertEqual(financeiro.listar(con, HOJE)[0]["falta"], 400000)
 
     def test_vencimentos_editados_e_validacao(self):
-        con = banco()
+        con = self.banco()
         base = {"cliente": "João", "valor_total": 30000, "entrada": 0, "valor_parcela": 10000, "qtd_parcelas": 3}
         lid = financeiro.salvar(con, {**base, "parcelas": [
             {"numero": 1, "vencimento": "2026-10-20", "valor": 10000},
@@ -82,9 +79,9 @@ class LancamentoTest(unittest.TestCase):
             financeiro.salvar(con, {**base, "entrada": 5000, "primeiro_vencimento": "2026-10-20"})  # entrada sem data
 
 
-class PainelTest(unittest.TestCase):
+class PainelTest(Base):
     def test_resumo_do_mes_inadimplentes_e_proximas(self):
-        con = banco()
+        con = self.banco()
         l = lancamento(con)
         financeiro.marcar_paga(con, l["parcelas"][0]["id"], True, "2026-09-10")  # entrada paga em setembro
         financeiro.marcar_paga(con, l["parcelas"][2]["id"], True, "2026-10-11")  # 2/4 (venc. 10/10) paga em outubro
@@ -105,15 +102,15 @@ class PainelTest(unittest.TestCase):
                          [("Empresa Y", "2026-10-20"), ("Maria da Silva", "2026-11-10"), ("Maria da Silva", "2026-12-10")])
 
     def test_lembrete_um_dia_depois_do_vencimento(self):
-        con = banco()
+        con = self.banco()
         lancamento(con)
         lembretes = financeiro.lembretes(financeiro.listar(con, HOJE), "2026-10-01", "2026-10-31")
         self.assertEqual([(p["rotulo"], p["vencimento"], p["data"]) for p in lembretes], [("2/4", "2026-10-10", "2026-10-11")])
 
 
-class PagamentoParcialTest(unittest.TestCase):
+class PagamentoParcialTest(Base):
     def test_status_saldo_e_historico(self):
-        con = banco()
+        con = self.banco()
         p2 = lancamento(con)["parcelas"][2]  # 2/4: R$ 1.000, venceu em 10/10
         g1 = financeiro.adicionar_pagamento(con, p2["id"], {"valor": 30000, "data": "2026-10-05"})
         p = financeiro.listar(con, HOJE)[0]["parcelas"][2]
@@ -131,7 +128,7 @@ class PagamentoParcialTest(unittest.TestCase):
         financeiro.excluir_pagamento(con, g1)
         p = financeiro.listar(con, HOJE)[0]["parcelas"][2]
         self.assertEqual((p["status"], p["pago_valor"], p["falta"]), ("parcial", 70000, 30000))
-        self.assertEqual(con.execute("SELECT pago FROM parcelas WHERE id=?", (p2["id"],)).fetchone()[0], 0)
+        self.assertEqual(con.execute("SELECT pago FROM parcelas WHERE id=%s", (p2["id"],)).fetchone()[0], 0)
         with self.assertRaisesRegex(ValueError, "Valor pago"):
             financeiro.adicionar_pagamento(con, p2["id"], {"valor": 0, "data": "2026-10-12"})
         with self.assertRaisesRegex(ValueError, "data do pagamento"):
@@ -140,7 +137,7 @@ class PagamentoParcialTest(unittest.TestCase):
             financeiro.excluir_pagamento(con, 9999)
 
     def test_caixinha_quita_o_que_falta(self):
-        con = banco()
+        con = self.banco()
         p2 = lancamento(con)["parcelas"][2]
         financeiro.adicionar_pagamento(con, p2["id"], {"valor": 40000, "data": "2026-10-01"})
         financeiro.marcar_paga(con, p2["id"], True, hoje=HOJE)
@@ -150,7 +147,7 @@ class PagamentoParcialTest(unittest.TestCase):
         self.assertEqual(financeiro.listar(con, HOJE)[0]["parcelas"][2]["pagamentos"], [])
 
     def test_totais_consideram_o_ja_pago(self):
-        con = banco()
+        con = self.banco()
         l = lancamento(con)
         financeiro.adicionar_pagamento(con, l["parcelas"][2]["id"], {"valor": 25000, "data": "2026-10-05"})  # 2/4 (out)
         financeiro.adicionar_pagamento(con, l["parcelas"][1]["id"], {"valor": 10000, "data": "2026-09-20"})  # 1/4 (set)
@@ -165,7 +162,7 @@ class PagamentoParcialTest(unittest.TestCase):
         self.assertEqual((lembrete["rotulo"], lembrete["status"], lembrete["falta"]), ("2/4", "parcial", 75000))
 
     def test_salvar_lancamento_guarda_o_historico(self):
-        con = banco()
+        con = self.banco()
         base = {"cliente": "João", "valor_total": 30000, "entrada": 0, "valor_parcela": 15000, "qtd_parcelas": 2}
         linhas = [{"numero": 1, "vencimento": "2026-10-20", "valor": 15000,
                    "pagamentos": [{"valor": 5000, "data": "2026-10-21"}, {"valor": 2000, "data": "2026-10-02"}]},
@@ -182,20 +179,10 @@ class PagamentoParcialTest(unittest.TestCase):
         financeiro.excluir(con, lid)
         self.assertEqual(con.execute("SELECT COUNT(*) FROM pagamentos").fetchone()[0], 0)
 
-    def test_migracao_transforma_parcela_paga_em_pagamento(self):
-        con = banco()
-        p2 = lancamento(con)["parcelas"][2]
-        con.execute("UPDATE parcelas SET pago=1, pago_em='2026-10-09' WHERE id=?", (p2["id"],))
-        db.meta_set(con, "schema_versao", "6")
-        db._migrar(con)
-        p = financeiro.listar(con, HOJE)[0]["parcelas"][2]
-        self.assertEqual([(g["valor"], g["data"]) for g in p["pagamentos"]], [(100000, "2026-10-09")])
-        self.assertEqual(p["status"], "paga")
 
-
-class InadimplenteTest(unittest.TestCase):
+class InadimplenteTest(Base):
     def test_fora_da_renda_do_mes_mas_no_total(self):
-        con = banco()
+        con = self.banco()
         lid = lancamento(con, inadimplente=True)["id"]
         financeiro.salvar(con, {"cliente": "Empresa Y", "valor_total": 20000, "valor_parcela": 20000, "qtd_parcelas": 1,
                                 "primeiro_vencimento": "2026-10-20"})
@@ -221,9 +208,9 @@ class InadimplenteTest(unittest.TestCase):
         self.assertFalse(quadro.carregar(con, HOJE)["cards"][0]["inadimplente"])
 
 
-class AniversarioTest(unittest.TestCase):
+class AniversarioTest(Base):
     def test_todo_ano_e_feito_por_ano(self):
-        con = banco()
+        con = self.banco()
         cid = quadro.criar(con, {"coluna_id": 1, "titulo": "Ana", "tipo": "preventivo", "aniversario": "1980-02-29"})
         anivs = quadro.aniversarios(con, "2026-01-01", "2028-12-31")
         self.assertEqual([a["data"] for a in anivs], ["2026-02-28", "2027-02-28", "2028-02-29"])  # 29/02 só em ano bissexto

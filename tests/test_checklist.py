@@ -1,22 +1,17 @@
 """Testes da checklist com data/horário/responsável, fonte única (agenda e card) e modelos padrão.
-Rodar: python -m unittest discover -s tests -v"""
-import json
-import sqlite3
+Rodar: python -m unittest discover -s tests -t . -v"""
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from app import agenda, checklist, config, db, quadro
+from app import agenda, checklist, config, quadro
+from tests.supabase_local import TesteComBanco
 
 
-def banco():
-    con = sqlite3.connect(":memory:")
-    con.row_factory = sqlite3.Row
-    con.executescript(db.SCHEMA)
-    con.execute("ALTER TABLE processos ADD COLUMN contagem TEXT")
-    db.semear_quadro(con)
-    return con
+class Base(TesteComBanco):
+    def banco(self):
+        return self.conexao()
 
 
 class NormalizarTest(unittest.TestCase):
@@ -41,11 +36,11 @@ class NormalizarTest(unittest.TestCase):
         self.assertNotEqual(itens[1]["id"], "abc")
 
 
-class FonteUnicaTest(unittest.TestCase):
+class FonteUnicaTest(Base):
     """Marcar como feito (na agenda ou no card) grava no mesmo item, na própria demanda."""
 
     def test_marcar_em_tarefa_e_em_card(self):
-        con = banco()
+        con = self.banco()
         lista = [{"id": "x1", "texto": "Elaboração do Mérito", "data": "2026-10-12"}, {"id": "x2", "texto": "Revisão"}]
         tid = agenda.criar(con, {"titulo": "Contestação", "checklist": lista})
         cid = quadro.criar(con, {"titulo": "Fulano", "coluna_id": 1, "tipo": "inicial", "checklist": lista})
@@ -76,9 +71,9 @@ class ModelosTest(unittest.TestCase):
                 self.assertEqual(config.checklists_padrao(), {"processo": ["Solto", "A"], "preventivo": ["B"]})
 
 
-class PessoasTest(unittest.TestCase):
+class PessoasTest(Base):
     def test_equipe(self):
-        con = banco()
+        con = self.banco()
         advs = [{"nome": "Beatriz Daffara", "oab_numero": "1", "oab_uf": "PR", "cor": "#111", "id": 1}]
         with mock.patch.object(checklist.db, "advogadas", lambda con: advs):
             pid = checklist.adicionar_pessoa(con, "  Ana Estagiária ")
@@ -88,23 +83,6 @@ class PessoasTest(unittest.TestCase):
             self.assertFalse(checklist.pessoas(con)[1]["ativo"])
             with self.assertRaises(ValueError):
                 checklist.adicionar_pessoa(con, " ")
-
-
-class MigracaoTest(unittest.TestCase):
-    def test_v5_da_id_aos_itens_antigos(self):
-        con = banco()
-        con.execute("INSERT INTO tarefas(titulo, checklist) VALUES('T', ?)", (json.dumps([{"texto": "A", "feito": True}]),))
-        con.execute("INSERT INTO quadro_cards(coluna_id, titulo, checklist) VALUES(1, 'C', ?)", (json.dumps([{"texto": "B"}]),))
-        db.meta_set(con, "schema_versao", "4")
-        db.meta_set(con, "feriados_padrao:2025", "x")  # não semear feriados no teste
-        for a in (2026, 2027, 2028):
-            db.meta_set(con, f"feriados_padrao:{a}", "x")
-        db._migrar(con)
-        t = json.loads(con.execute("SELECT checklist FROM tarefas").fetchone()[0])[0]
-        c = json.loads(con.execute("SELECT checklist FROM quadro_cards").fetchone()[0])[0]
-        self.assertTrue(t["id"] and c["id"])
-        self.assertEqual((t["texto"], t["feito"], c["texto"]), ("A", True, "B"))
-        self.assertEqual(db.meta_get(con, "schema_versao"), str(db.SCHEMA_VERSAO))
 
 
 class TipoPrazoTest(unittest.TestCase):

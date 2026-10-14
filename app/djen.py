@@ -14,6 +14,8 @@ from typing import Iterator
 
 import httpx
 
+from .tempo import TempoEsgotado, cabe, timeout_ate
+
 log = logging.getLogger("djen")
 
 BASE_URL = "https://comunicaapi.pje.jus.br/api/v1"
@@ -27,7 +29,9 @@ class DjenErro(Exception):
 
 
 class DjenClient:
-    def __init__(self, timeout: float = 90.0):
+    def __init__(self, timeout: float = 90.0, prazo: float | None = None):
+        """prazo: time.monotonic() limite (passo da sincronização); passou dele, levanta TempoEsgotado."""
+        self.timeout, self.prazo = timeout, prazo
         self.http = httpx.Client(
             base_url=BASE_URL,
             timeout=timeout,
@@ -50,9 +54,14 @@ class DjenClient:
     def _aguardar_vez(self):
         espera = max(INTERVALO_MINIMO - (time.monotonic() - self._ultima_req), self._pausa_extra)
         if espera > 0:
-            time.sleep(espera)
+            self._dormir(espera)
         self._pausa_extra = 0.0
         self._ultima_req = time.monotonic()
+
+    def _dormir(self, segundos: float):
+        if not cabe(self.prazo, segundos + 5):
+            raise TempoEsgotado("DJEN: espera maior que o tempo que sobra neste passo")
+        time.sleep(segundos)
 
     def _ler_ratelimit(self, headers: httpx.Headers):
         try:
@@ -70,11 +79,11 @@ class DjenClient:
         for tentativa, espera in enumerate(ESPERAS, start=1):
             self._aguardar_vez()
             try:
-                r = self.http.get(caminho, params=params)
+                r = self.http.get(caminho, params=params, timeout=timeout_ate(self.prazo, self.timeout))
             except httpx.HTTPError as e:
                 ultimo_erro = f"falha de rede: {e.__class__.__name__}"
                 log.warning("DJEN %s (tentativa %d): %s; nova tentativa em %ss", caminho, tentativa, ultimo_erro, espera)
-                time.sleep(espera)
+                self._dormir(espera)
                 continue
 
             self._ler_ratelimit(r.headers)
@@ -92,7 +101,7 @@ class DjenClient:
             else:
                 raise DjenErro(f"HTTP {r.status_code}: {_mensagem(r)}")
             log.warning("DJEN %s (tentativa %d): %s; nova tentativa em %ss", caminho, tentativa, ultimo_erro, espera)
-            time.sleep(espera)
+            self._dormir(espera)
         raise DjenErro(f"DJEN indisponível após {len(ESPERAS)} tentativas ({ultimo_erro})")
 
     # --- API ------------------------------------------------------------

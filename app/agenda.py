@@ -18,7 +18,7 @@ class Calendarios:
     """Um Calendario por tribunal/órgão, montado a partir da tabela de feriados (lida uma vez por requisição)."""
 
     def __init__(self, con):
-        self.registros = [dict(r) for r in con.execute("SELECT * FROM feriados WHERE ativo=1")]
+        self.registros = [dict(r) for r in con.execute("SELECT * FROM feriados WHERE ativo")]
         self._cache = {}
 
     def de(self, tribunal: str | None = "", orgao: str | None = "") -> prazos.Calendario:
@@ -38,7 +38,7 @@ def regras(cfg: dict | None = None) -> dict:
 def calcular_para(con, numero: str | None, disponibilizacao: str, dias: int, contagem: str | None = None,
                   cals: Calendarios | None = None) -> dict:
     """Prazo fatal para um processo (usa o calendário do tribunal/comarca e a contagem definida no processo)."""
-    p = con.execute("SELECT tribunal, orgao, contagem FROM processos WHERE numero=?", (numero or "",)).fetchone()
+    p = con.execute("SELECT tribunal, orgao, contagem FROM processos WHERE numero=%s", (numero or "",)).fetchone()
     tribunal = p["tribunal"] if p else (cnj.tribunal(numero)[0] if numero else "")
     r = regras()
     contagem = contagem or (p["contagem"] if p else None) or r["contagem_padrao"]
@@ -57,9 +57,9 @@ def tipo_prazo(origem: str | None, calculo) -> str:
     return "processual" if origem == "djen" or calculo else "interno"
 
 
-def _tarefa_dict(r, cals: Calendarios, hoje: date) -> dict:
+def _tarefa_dict(r, cals: Calendarios, hoje: date, itens: dict) -> dict:
     d = dict(r)
-    d["checklist"] = checklist.ler(d.get("checklist"))
+    d["checklist"] = itens.get(d["id"], [])
     try:
         d["calculo"] = json.loads(d["calculo"]) if d.get("calculo") else None
     except ValueError:
@@ -80,33 +80,33 @@ def _tarefa_dict(r, cals: Calendarios, hoje: date) -> dict:
 
 _SELECT = """SELECT t.*, p.tribunal AS p_tribunal, p.orgao AS p_orgao, p.partes AS p_partes, c.link AS link,
                     c.data_disp AS data_disp,
-                    (SELECT GROUP_CONCAT(advogada_id) FROM processo_advogada pa WHERE pa.numero=t.numero) AS p_advs
+                    (SELECT string_agg(advogada_id::text, ',') FROM processo_advogada pa WHERE pa.numero=t.numero) AS p_advs
              FROM tarefas t LEFT JOIN processos p ON p.numero=t.numero
              LEFT JOIN comunicacoes c ON c.hash=t.comunicacao_hash"""
 
 
 def listar(con, hoje: date | None = None, ocultar_cooperacao: bool | None = None) -> list[dict]:
-    """Tarefas abertas e concluídas. Com "ocultar processos em cooperação" ligado (padrão: o do config.json), as
+    """Tarefas abertas e concluídas. Com "ocultar processos em cooperação" ligado (padrão: o ajuste da tela), as
     tarefas desses processos ficam de fora (Monitoramento, Agenda e alertas)."""
     cals, hoje = Calendarios(con), hoje or date.today()
     if ocultar_cooperacao is None:
-        ocultar_cooperacao = config.carregar(com_env=False)["ocultar_cooperacao"]
-    filtro = " AND COALESCE(p.cooperacao_manual, p.cooperacao, 0) = 0" if ocultar_cooperacao else ""
-    rows = con.execute(_SELECT + f" WHERE t.status != 'descartado'{filtro}"
-                       " ORDER BY t.prazo_fatal IS NULL, t.prazo_fatal, t.id")
-    return [_tarefa_dict(r, cals, hoje) for r in rows]
+        ocultar_cooperacao = config.efetiva(con)["ocultar_cooperacao"]
+    # tarefa sem processo (p nulo) continua aparecendo
+    filtro = " AND NOT COALESCE(p.cooperacao_manual, p.cooperacao, false)" if ocultar_cooperacao else ""
+    rows = con.execute(_SELECT + f" WHERE t.status != 'descartado'{filtro} ORDER BY t.prazo_fatal NULLS LAST, t.id").fetchall()
+    itens = checklist.ler(con, "tarefa", [r["id"] for r in rows])
+    return [_tarefa_dict(r, cals, hoje, itens) for r in rows]
 
 
 def obter(con, tid: int) -> dict | None:
-    r = con.execute(_SELECT + " WHERE t.id=?", (tid,)).fetchone()
-    return _tarefa_dict(r, Calendarios(con), date.today()) if r else None
+    r = con.execute(_SELECT + " WHERE t.id=%s", (tid,)).fetchone()
+    return _tarefa_dict(r, Calendarios(con), date.today(), checklist.ler(con, "tarefa", [tid])) if r else None
 
 
 def _valores(dados: dict) -> dict:
-    v = {k: dados[k] for k in CAMPOS if k in dados}
-    if "checklist" in v:
-        lista = json.loads(v["checklist"]) if isinstance(v["checklist"], str) else v["checklist"]
-        v["checklist"] = json.dumps(checklist.normalizar(lista), ensure_ascii=False)
+    v = {k: dados[k] for k in CAMPOS if k in dados and k != "checklist"}  # checklist: tabela própria
+    if "conferir" in v:
+        v["conferir"] = bool(v["conferir"])
     if "calculo" in v and not isinstance(v["calculo"], str) and v["calculo"] is not None:
         v["calculo"] = json.dumps(v["calculo"], ensure_ascii=False)
     if "numero" in v:
@@ -130,40 +130,48 @@ def criar(con, dados: dict) -> int:
     if v["status"] == "concluido":
         v["concluido_em"] = db.agora()
     cols = ",".join(v)
-    cur = con.execute(f"INSERT INTO tarefas({cols}) VALUES({','.join('?' * len(v))})", list(v.values()))
-    return cur.lastrowid
+    tid = con.execute(f"INSERT INTO tarefas({cols}) VALUES({','.join(['%s'] * len(v))}) RETURNING id",
+                      list(v.values())).fetchone()[0]
+    if dados.get("checklist"):
+        checklist.gravar(con, "tarefa", tid, _lista(dados["checklist"]))
+    return tid
+
+
+def _lista(valor) -> list:
+    return json.loads(valor) if isinstance(valor, str) else (valor or [])
 
 
 def atualizar(con, tid: int, dados: dict):
     v = _valores(dados)
-    if not v:
+    if "checklist" in dados:
+        checklist.gravar(con, "tarefa", tid, _lista(dados["checklist"]))
+    elif not v:
         return
     v["atualizado_em"] = db.agora()
-    atual = con.execute("SELECT status FROM tarefas WHERE id=?", (tid,)).fetchone()
+    atual = con.execute("SELECT status FROM tarefas WHERE id=%s", (tid,)).fetchone()
     if "status" in v and atual and v["status"] != atual["status"]:
         concluindo = v["status"] == "concluido"
         v["concluido_em"] = db.agora() if concluindo else None
         v["status_anterior"] = atual["status"] if concluindo else None
-    sets = ",".join(f"{k}=?" for k in v)
-    con.execute(f"UPDATE tarefas SET {sets} WHERE id=?", [*v.values(), tid])
+    sets = ",".join(f"{k}=%s" for k in v)
+    con.execute(f"UPDATE tarefas SET {sets} WHERE id=%s", [*v.values(), tid])
 
 
 def restaurar(con, tid: int) -> bool:
     """Tira de Concluídos e devolve à coluna em que estava (ou 'A fazer')."""
     cur = con.execute("""UPDATE tarefas SET status=COALESCE(NULLIF(status_anterior, 'concluido'), 'a_fazer'),
-                         status_anterior=NULL, concluido_em=NULL, atualizado_em=? WHERE id=? AND status='concluido'""",
+                         status_anterior=NULL, concluido_em=NULL, atualizado_em=%s WHERE id=%s AND status='concluido'""",
                       (db.agora(), tid))
     return cur.rowcount > 0
 
 
 def lote(con, ids: list[int], acao: str) -> int:
-    marcas = ",".join("?" * len(ids))
     if acao == "confirmar":
-        cur = con.execute(f"UPDATE tarefas SET status='a_fazer', atualizado_em=? WHERE status='sugerido' AND id IN ({marcas})",
-                          [db.agora(), *ids])
+        cur = con.execute("UPDATE tarefas SET status='a_fazer', atualizado_em=%s WHERE status='sugerido' AND id = ANY(%s)",
+                          (db.agora(), list(ids)))
     elif acao == "descartar":  # fica guardado como descartado: a mesma publicação não volta a sugerir
-        cur = con.execute(f"UPDATE tarefas SET status='descartado', atualizado_em=? WHERE id IN ({marcas})",
-                          [db.agora(), *ids])
+        cur = con.execute("UPDATE tarefas SET status='descartado', atualizado_em=%s WHERE id = ANY(%s)",
+                          (db.agora(), list(ids)))
     else:
         raise ValueError("ação inválida")
     return cur.rowcount
@@ -200,14 +208,14 @@ def gerar_semanais(con, hoje: date | None = None) -> int:
     segunda = hoje - timedelta(days=hoje.weekday())
     criadas = 0
     for numero in sigilosos(con):
-        cur = con.execute("INSERT OR IGNORE INTO tarefas_geradas(chave, criado_em) VALUES(?,?)",
+        cur = con.execute("INSERT INTO tarefas_geradas(chave, criado_em) VALUES(%s,%s) ON CONFLICT DO NOTHING",
                           (f"sigilo:{numero}:{segunda.isoformat()}", db.agora()))
         if not cur.rowcount:
             continue  # esta semana já foi gerada
-        if con.execute("SELECT 1 FROM tarefas WHERE origem='sigilo' AND numero=? AND status NOT IN ('concluido', 'descartado')",
+        if con.execute("SELECT 1 FROM tarefas WHERE origem='sigilo' AND numero=%s AND status NOT IN ('concluido', 'descartado')",
                        (numero,)).fetchone():
             continue
-        advs = [r[0] for r in con.execute("SELECT advogada_id FROM processo_advogada WHERE numero=?", (numero,))]
+        advs = [r[0] for r in con.execute("SELECT advogada_id FROM processo_advogada WHERE numero=%s", (numero,))]
         criar(con, {"titulo": f"Verificar processo sigiloso nº {cnj.formatar(numero)}", "tipo": "tarefa",
                     "status": "a_fazer", "numero": numero, "advogada_id": advs[0] if len(advs) == 1 else None,
                     "prazo_fatal": max(segunda, hoje).isoformat(), "prioridade": "media", "origem": "sigilo",
@@ -249,8 +257,8 @@ def verificar(con, incluir_vencidos: bool = False, hoje: date | None = None) -> 
         """SELECT c.hash, c.numero, c.data_disp, c.texto, p.tribunal, p.orgao, p.contagem
            FROM comunicacoes c LEFT JOIN processos p ON p.numero=c.numero
            LEFT JOIN comunicacao_analise a ON a.hash=c.hash
-           WHERE a.hash IS NULL OR (? AND a.resultado='ja_vencido')
-           ORDER BY c.data_disp""", (1 if incluir_vencidos else 0,)))
+           WHERE a.hash IS NULL OR (%s AND a.resultado='ja_vencido')
+           ORDER BY c.data_disp""", (bool(incluir_vencidos),)))
     res = {"analisadas": len(rows), "sugeridos": 0, "audiencias": 0, "sem_prazo": 0, "ja_vencidos": 0,
            "repetidos": 0, "erros": 0, "conferir": 0}
     for r in rows:
@@ -260,7 +268,7 @@ def verificar(con, incluir_vencidos: bool = False, hoje: date | None = None) -> 
         except Exception as e:  # uma publicação estranha não interrompe a varredura
             log.exception("Erro ao analisar %s", r["hash"])
             resultado, res["erros"] = f"erro: {e}", res["erros"] + 1
-        con.execute("""INSERT INTO comunicacao_analise(hash, analisado_em, resultado) VALUES(?,?,?)
+        con.execute("""INSERT INTO comunicacao_analise(hash, analisado_em, resultado) VALUES(%s,%s,%s)
                        ON CONFLICT(hash) DO UPDATE SET analisado_em=excluded.analisado_em, resultado=excluded.resultado""",
                     (r["hash"], db.agora(), resultado.split(":")[0]))
     log.info("Verificar prazos: %s", res)
@@ -272,7 +280,7 @@ def _analisar_uma(con, r, cals, lista_tipos, cfg, incluir_vencidos, hoje, res) -
     if not a:
         res["sem_prazo"] += 1
         return "sem_prazo"
-    advs = [x[0] for x in con.execute("SELECT advogada_id FROM comunicacao_advogada WHERE hash=?", (r["hash"],))]
+    advs = [x[0] for x in con.execute("SELECT advogada_id FROM comunicacao_advogada WHERE hash=%s", (r["hash"],))]
     responsavel = advs[0] if len(advs) == 1 else None
     cards, vencidos = [], 0
 
@@ -292,7 +300,7 @@ def _analisar_uma(con, r, cals, lista_tipos, cfg, incluir_vencidos, hoje, res) -
                 "titulo": f"{a['tipo'] or 'Prazo'} ({unidade})", "tipo": "prazo",
                 "prazo_fatal": calc["vencimento"], "data_interna": calc["interno"],
                 "prioridade": "alta" if a["dias"] <= 5 else "media", "trecho": a["trecho"], "calculo": calc,
-                "conferir": 1 if a["confianca"] != "alta" else 0, "aviso": "\n".join(a["avisos"]) or None,
+                "conferir": a["confianca"] != "alta", "aviso": "\n".join(a["avisos"]) or None,
             })
 
     aud = a.get("audiencia")
@@ -303,14 +311,15 @@ def _analisar_uma(con, r, cals, lista_tipos, cfg, incluir_vencidos, hoje, res) -
             cards.append({
                 "titulo": "Audiência" + (f" às {aud['hora']}" if aud["hora"] else ""), "tipo": "audiencia",
                 "prazo_fatal": aud["data"], "hora": aud["hora"], "prioridade": "alta", "trecho": aud["trecho"],
-                "conferir": 1, "aviso": "Data de audiência lida do texto: conferir no processo.",
+                "conferir": True, "aviso": "Data de audiência lida do texto: conferir no processo.",
                 "calculo": {"passos": [f"Data e hora lidas do texto da publicação ({r['data_disp']})."]},
             })
 
     criados = 0
     for c in cards:
         # Publicações repetidas (uma por parte intimada) não geram cartões repetidos
-        igual = con.execute("SELECT id FROM tarefas WHERE origem='djen' AND numero IS ? AND prazo_fatal=? AND titulo=?",
+        igual = con.execute("SELECT id FROM tarefas WHERE origem='djen' AND numero IS NOT DISTINCT FROM %s"
+                            " AND prazo_fatal=%s AND titulo=%s",
                             (r["numero"], c["prazo_fatal"], c["titulo"])).fetchone()
         if igual:
             res["repetidos"] += 1
@@ -319,7 +328,7 @@ def _analisar_uma(con, r, cals, lista_tipos, cfg, incluir_vencidos, hoje, res) -
                     "origem": "djen", "comunicacao_hash": r["hash"]})
         criados += 1
         res["audiencias" if c["tipo"] == "audiencia" else "sugeridos"] += 1
-        res["conferir"] += c["conferir"]
+        res["conferir"] += int(c["conferir"])
     res["ja_vencidos"] += vencidos
     if criados:
         return "prazo"
@@ -330,7 +339,7 @@ def _analisar_uma(con, r, cals, lista_tipos, cfg, incluir_vencidos, hoje, res) -
 
 def listar_feriados(con, ano: int | None = None) -> list[dict]:
     if ano:
-        rows = con.execute("""SELECT * FROM feriados WHERE recorrente=1 OR inicio LIKE ? OR fim LIKE ?
+        rows = con.execute("""SELECT * FROM feriados WHERE recorrente OR inicio LIKE %s OR fim LIKE %s
                               ORDER BY recorrente, inicio""", (f"{ano}-%", f"{ano}-%"))
     else:
         rows = con.execute("SELECT * FROM feriados ORDER BY recorrente, inicio")
@@ -338,7 +347,7 @@ def listar_feriados(con, ano: int | None = None) -> list[dict]:
 
 
 def salvar_feriado(con, dados: dict, fid: int | None = None) -> int:
-    rec = 1 if dados.get("recorrente") else 0
+    rec = bool(dados.get("recorrente"))
     ini, fim = (dados.get("inicio") or "").strip(), (dados.get("fim") or "").strip() or None
     for x in filter(None, (ini, fim)):
         date.fromisoformat(x)  # datas sempre completas na tela; recorrente guarda só MM-DD
@@ -349,20 +358,19 @@ def salvar_feriado(con, dados: dict, fid: int | None = None) -> int:
     if dados.get("tipo") not in prazos.TIPOS:
         raise ValueError("tipo inválido")
     valores = (ini, fim, dados["descricao"].strip(), dados["tipo"], (dados.get("tribunais") or "").upper().replace(" ", ""),
-               (dados.get("comarca") or "").strip(), rec, 1 if dados.get("ativo", True) else 0)
+               (dados.get("comarca") or "").strip(), rec, bool(dados.get("ativo", True)))
     if fid:
-        con.execute("""UPDATE feriados SET inicio=?, fim=?, descricao=?, tipo=?, tribunais=?, comarca=?, recorrente=?,
-                       ativo=?, origem='manual' WHERE id=?""", (*valores, fid))
+        con.execute("""UPDATE feriados SET inicio=%s, fim=%s, descricao=%s, tipo=%s, tribunais=%s, comarca=%s,
+                       recorrente=%s, ativo=%s, origem='manual' WHERE id=%s""", (*valores, fid))
         return fid
-    cur = con.execute("""INSERT INTO feriados(inicio, fim, descricao, tipo, tribunais, comarca, recorrente, ativo, origem)
-                         VALUES(?,?,?,?,?,?,?,?,'manual')""", valores)
-    return cur.lastrowid
+    return con.execute("""INSERT INTO feriados(inicio, fim, descricao, tipo, tribunais, comarca, recorrente, ativo, origem)
+                          VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'manual') RETURNING id""", valores).fetchone()[0]
 
 
 def dias_nao_uteis(con, de: str, ate: str) -> list[dict]:
     """Feriados/suspensões expandidos dia a dia, para mostrar no calendário da agenda."""
     a, b = date.fromisoformat(de), date.fromisoformat(ate)
-    cal = prazos.Calendario([dict(r) for r in con.execute("SELECT * FROM feriados WHERE ativo=1")], todos=True)
+    cal = prazos.Calendario([dict(r) for r in con.execute("SELECT * FROM feriados WHERE ativo")], todos=True)
     saida, d = [], a
     while d <= b and (d - a).days < 120:
         for r in cal.registros(d):
@@ -379,7 +387,7 @@ def salvar_tipos(con, lista: list[dict]):
     for i, t in enumerate(lista, start=1):
         if not (t.get("nome") or "").strip() or not (t.get("palavras") or "").strip():
             continue
-        con.execute("INSERT INTO tipos_ato(ordem, nome, palavras, dias, contagem, justica, ativo) VALUES(?,?,?,?,?,?,?)",
+        con.execute("INSERT INTO tipos_ato(ordem, nome, palavras, dias, contagem, justica, ativo) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                     (i, t["nome"].strip(), t["palavras"].strip(), int(t.get("dias") or 5),
                      "corridos" if t.get("contagem") == "corridos" else "uteis",
-                     "trabalho" if t.get("justica") == "trabalho" else "", 1 if t.get("ativo", True) else 0))
+                     "trabalho" if t.get("justica") == "trabalho" else "", bool(t.get("ativo", True))))

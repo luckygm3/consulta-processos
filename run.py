@@ -1,4 +1,5 @@
-"""Inicia o app em http://127.0.0.1:<porta> (só nesta máquina) e abre o navegador.
+"""Inicia o app em http://127.0.0.1:<porta> (só nesta máquina) e abre o navegador. Os dados ficam no Supabase
+(variáveis no .env).
 
 Uso: python run.py [--sem-navegador]
 """
@@ -19,7 +20,18 @@ def porta_ocupada(porta: int) -> bool:
         return s.connect_ex(("127.0.0.1", porta)) == 0
 
 
+FALTANDO = """
+  Falta configurar a conexão com o Supabase: {faltam}.
+  Copie o arquivo .env.example para .env (na pasta do app) e preencha com os dados do
+  projeto no Supabase (passo a passo no README, seções 1 e 2).
+"""
+
+
 def main():
+    faltam = [v for v in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "DATABASE_URL") if not config.ambiente(v, obrigatoria=False)]
+    if faltam:
+        print(FALTANDO.format(faltam=", ".join(faltam)))
+        sys.exit(1)
     porta = int(config.carregar().get("porta") or 8000)
     url = f"http://127.0.0.1:{porta}"
     abrir = "--sem-navegador" not in sys.argv

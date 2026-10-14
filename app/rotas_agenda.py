@@ -126,11 +126,11 @@ def restaurar(tid: int):
 @rotas.delete("/agenda/{tid}")
 def excluir(tid: int):
     with db.conexao() as con:
-        r = con.execute("SELECT origem FROM tarefas WHERE id=?", (tid,)).fetchone()
+        r = con.execute("SELECT origem FROM tarefas WHERE id=%s", (tid,)).fetchone()
         if r and r["origem"] == "djen":
             agenda.lote(con, [tid], "descartar")  # guarda como descartada: a publicação não sugere de novo
         else:
-            con.execute("DELETE FROM tarefas WHERE id=?", (tid,))
+            con.execute("DELETE FROM tarefas WHERE id=%s", (tid,))
     return {"ok": True}
 
 
@@ -160,7 +160,7 @@ def calcular(disponibilizacao: str, dias: int, numero: str = "", contagem: str =
 def contagem_processo(numero: str, dados: dict = Body(...)):
     valor = dados.get("contagem") if dados.get("contagem") in ("uteis", "corridos") else None
     with db.conexao() as con:
-        con.execute("UPDATE processos SET contagem=? WHERE numero=?", (valor, cnj.so_digitos(numero)))
+        con.execute("UPDATE processos SET contagem=%s WHERE numero=%s", (valor, cnj.so_digitos(numero)))
     return {"ok": True, "contagem": valor}
 
 
@@ -193,7 +193,7 @@ def editar_feriado(fid: int, dados: dict = Body(...)):
 @rotas.delete("/feriados/{fid}")
 def excluir_feriado(fid: int):
     with db.conexao() as con:
-        con.execute("DELETE FROM feriados WHERE id=?", (fid,))
+        con.execute("DELETE FROM feriados WHERE id=%s", (fid,))
     return {"ok": True}
 
 

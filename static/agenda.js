@@ -931,9 +931,6 @@ function ligarAgenda() {
     if (ev.target.closest("[data-tipo-remover]")) tr.remove();
   };
 
-  carregarAlertas();
-  // depois de todos os scripts (quadro.js registra a tela dele em TELAS)
-  document.addEventListener("DOMContentLoaded", () => mostrarTela(location.hash.slice(1) || lerPreferencia("tela") || "processos"));
 }
 
 ligarAgenda();

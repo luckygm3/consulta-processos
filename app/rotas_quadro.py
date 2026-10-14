@@ -51,7 +51,7 @@ def atualizar(cid: int, dados: dict = Body(...)):
 @rotas.delete("/cards/{cid}")
 def excluir(cid: int):
     with db.conexao() as con:
-        con.execute("DELETE FROM quadro_cards WHERE id=?", (cid,))
+        con.execute("DELETE FROM clientes WHERE id=%s", (cid,))
     return {"ok": True}
 
 

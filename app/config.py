@@ -1,14 +1,19 @@
-"""Configuração local: config.json (editável) + variável DATAJUD_API_KEY opcional (.env ou ambiente).
+"""Configuração: variáveis de ambiente (.env no computador; painel da Vercel no site), padrões do config.json
+(só leitura: no servidor da Vercel não dá para gravar arquivo) e ajustes feitos na tela (guardados no banco).
 
-Advogadas ficam em "advogadas": [{"nome", "oab_numero", "oab_uf", "cor"}]. Um config.json antigo, com
-oab_numero/oab_uf/nome_advogado soltos, continua funcionando: vira uma lista de uma advogada só.
-Processos em cooperação: "advogados_cooperacao" ([{"nome", "oab_numero", "oab_uf"}]) e "ocultar_cooperacao".
+Variáveis (ver .env.example):
+  DATABASE_URL        conexão do backend com o Postgres do Supabase (segredo do servidor; nunca vai para a tela)
+  SUPABASE_URL        https://<projeto>.supabase.co
+  SUPABASE_ANON_KEY   chave pública "anon": a única que a tela recebe (para o login)
+  DATAJUD_API_KEY     opcional; tem precedência sobre a do config.json e a salva na tela
+
+Processos em cooperação: os advogados de cooperação ficam na tabela advogados_cooperacao (editável em ⚙) e
+"ocultar processos em cooperação" é um ajuste da tela (padrão: ligado).
 """
 import json
 import logging
 import os
 import re
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -16,21 +21,16 @@ CONFIG_PATH = BASE_DIR / "config.json"
 CHECKLIST_PATH = BASE_DIR / "checklists_padrao.txt"
 MODELOS_CHECKLIST = ("processo", "preventivo")
 ENV_PATH = BASE_DIR / ".env"
-DB_DIR = BASE_DIR / "db"
+DB_DIR = BASE_DIR / "db"                      # banco SQLite antigo (origem do script de migração)
 DB_PATH = DB_DIR / "processos.sqlite3"
 LOG_DIR = BASE_DIR / "logs"
 STATIC_DIR = BASE_DIR / "static"
 
-ADVOGADAS_PADRAO = [
-    {"nome": "Beatriz Daffara", "oab_numero": "130678", "oab_uf": "PR", "cor": "#7c3aed"},
-]
+CORES = ["#7c3aed", "#0f766e", "#c2410c", "#be185d", "#4d7c0f", "#0369a1"]
 # Advogados de fora do escritório: processo em que algum deles consta é "em cooperação" (dá para ocultar)
 COOPERACAO_PADRAO = [{"nome": "Jessica Delmoni", "oab_numero": "13043", "oab_uf": "AL"}]
-CORES = ["#7c3aed", "#0f766e", "#c2410c", "#be185d", "#4d7c0f", "#0369a1"]
-LEGADO = ("oab_numero", "oab_uf", "nome_advogado")  # formato antigo (uma advogada só)
 
 DEFAULTS = {
-    "advogadas": ADVOGADAS_PADRAO,
     "datajud_api_key": "",
     "backfill_dias": 180,
     "janela_dias": 30,
@@ -41,21 +41,35 @@ DEFAULTS = {
     "prazos_dias_internos": 2,
     "prazos_contagem_padrao": "uteis",
     "ocultar_cooperacao": True,
-    "advogados_cooperacao": COOPERACAO_PADRAO,
+    "advogados_cooperacao": COOPERACAO_PADRAO,  # só o valor inicial: depois vale a tabela advogados_cooperacao
     "porta": 8000,
 }
+AJUSTAVEIS = ("datajud_api_key", "backfill_dias", "ocultar_cooperacao")  # mudados na tela (ficam no banco)
 
 
-def _ler_env_arquivo() -> dict:
-    """Lê um .env simples (CHAVE=valor), sem dependências extras."""
-    valores = {}
-    if ENV_PATH.exists():
-        for linha in ENV_PATH.read_text(encoding="utf-8").splitlines():
-            linha = linha.strip()
-            if linha and not linha.startswith("#") and "=" in linha:
-                k, v = linha.split("=", 1)
-                valores[k.strip()] = v.strip().strip('"').strip("'")
-    return valores
+def carregar_env() -> None:
+    """Lê o .env (CHAVE=valor) para o ambiente, sem sobrescrever o que já veio do sistema/Vercel."""
+    if not ENV_PATH.exists():
+        return
+    for linha in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+        linha = linha.strip()
+        if linha and not linha.startswith("#") and "=" in linha:
+            k, v = linha.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+carregar_env()
+
+
+def ambiente(nome: str, obrigatoria: bool = True) -> str:
+    valor = os.environ.get(nome, "").strip()
+    if obrigatoria and not valor:
+        raise RuntimeError(f"Falta a variável {nome} (veja o .env.example e o README).")
+    return valor
+
+
+def na_vercel() -> bool:
+    return bool(os.environ.get("VERCEL"))
 
 
 def normalizar_chave(chave: str) -> str:
@@ -66,24 +80,42 @@ def normalizar_chave(chave: str) -> str:
     return chave.strip()
 
 
-def _advogadas(cfg: dict) -> list[dict]:
-    """Normaliza a lista de advogadas; converte o formato antigo (OAB única) se for o caso."""
-    lista = cfg.get("advogadas")
-    if not isinstance(lista, list) or not lista:
-        if any(cfg.get(k) for k in LEGADO):
-            lista = [{"nome": cfg.get("nome_advogado", ""), "oab_numero": cfg.get("oab_numero", ""),
-                      "oab_uf": cfg.get("oab_uf", "")}]
-        else:
-            lista = ADVOGADAS_PADRAO
-    saida = []
-    for i, a in enumerate(x for x in lista if isinstance(x, dict)):
-        oab, uf = str(a.get("oab_numero") or "").strip(), str(a.get("oab_uf") or "").strip().upper()
-        nome = str(a.get("nome") or "").strip()
-        if not (oab and uf) and not nome:
-            continue
-        saida.append({"nome": nome or f"OAB {oab}/{uf}", "oab_numero": oab, "oab_uf": uf,
-                      "cor": str(a.get("cor") or CORES[i % len(CORES)])})
-    return saida
+def _arquivo() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.getLogger(__name__).error("config.json inválido (%s); usando padrões", e)
+        return {}
+
+
+def carregar() -> dict:
+    """Padrões + config.json (sem os ajustes da tela, que estão no banco: use efetiva())."""
+    cfg = dict(DEFAULTS)
+    cfg.update({k: v for k, v in _arquivo().items() if k in DEFAULTS})
+    cfg["advogados_cooperacao"] = _cooperacao(cfg)
+    return cfg
+
+
+def efetiva(con) -> dict:
+    """Configuração em uso: padrões, config.json, ajustes salvos na tela e, por último, DATAJUD_API_KEY do ambiente."""
+    cfg = carregar()
+    for r in con.execute("SELECT chave, valor FROM meta WHERE chave LIKE 'ajuste:%%'"):
+        k = r["chave"].split(":", 1)[1]
+        if k in AJUSTAVEIS:
+            cfg[k] = json.loads(r["valor"])
+    if os.environ.get("DATAJUD_API_KEY"):
+        cfg["datajud_api_key"] = os.environ["DATAJUD_API_KEY"]
+    cfg["datajud_api_key"] = normalizar_chave(cfg.get("datajud_api_key", ""))
+    cfg["ocultar_cooperacao"] = bool(cfg.get("ocultar_cooperacao"))
+    cfg["advogados_cooperacao"] = cooperacao(con)
+    return cfg
+
+
+def ajustar(con, **valores) -> None:
+    for k, v in valores.items():
+        if k in AJUSTAVEIS:
+            con.execute("INSERT INTO meta(chave, valor) VALUES(%s, %s) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
+                        (f"ajuste:{k}", json.dumps(v)))
 
 
 def _cooperacao(cfg: dict) -> list[dict]:
@@ -101,39 +133,41 @@ def _cooperacao(cfg: dict) -> list[dict]:
     return saida
 
 
-def carregar(com_env: bool = True) -> dict:
-    """Lê o config.json. Com com_env=True, DATAJUD_API_KEY do ambiente/.env tem precedência."""
-    cfg = dict(DEFAULTS)
-    if CONFIG_PATH.exists():
-        try:
-            lido = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            if "advogadas" not in lido:  # config antigo: não deixa o padrão mascarar a OAB que estava lá
-                cfg.pop("advogadas")
-            cfg.update(lido)
-        except (OSError, json.JSONDecodeError) as e:
-            logging.getLogger(__name__).error("config.json inválido (%s); usando padrões", e)
-    else:
-        salvar(cfg)
-    cfg["advogadas"] = _advogadas(cfg)
-    cfg["advogados_cooperacao"] = _cooperacao(cfg)
-    cfg["ocultar_cooperacao"] = bool(cfg.get("ocultar_cooperacao"))
-    # O código antigo lia estes campos; continuam valendo para a primeira advogada
-    primeira = cfg["advogadas"][0] if cfg["advogadas"] else {"nome": "", "oab_numero": "", "oab_uf": ""}
-    cfg.setdefault("nome_advogado", primeira["nome"])
-    cfg.setdefault("oab_numero", primeira["oab_numero"])
-    cfg.setdefault("oab_uf", primeira["oab_uf"])
-    env_key = os.environ.get("DATAJUD_API_KEY") or _ler_env_arquivo().get("DATAJUD_API_KEY")
-    if com_env and env_key:
-        cfg["datajud_api_key"] = env_key
-    cfg["datajud_api_key"] = normalizar_chave(cfg.get("datajud_api_key", ""))
-    return cfg
+def cooperacao(con) -> list[dict]:
+    """Advogados de cooperação cadastrados (tabela advogados_cooperacao)."""
+    return [{"nome": r["nome"], "oab_numero": r["oab_numero"], "oab_uf": r["oab_uf"]}
+            for r in con.execute("SELECT nome, oab_numero, oab_uf FROM advogados_cooperacao ORDER BY id")]
 
 
-def salvar(cfg: dict) -> None:
-    dados = {k: cfg.get(k, v) for k, v in DEFAULTS.items()}
-    dados["advogadas"] = _advogadas(cfg)
-    dados["advogados_cooperacao"] = _cooperacao(cfg)
-    CONFIG_PATH.write_text(json.dumps(dados, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def salvar_cooperacao(con, lista: list[dict]) -> list[dict]:
+    """Troca a lista inteira (vinda da tela). Devolve a lista normalizada."""
+    lista = _cooperacao({"advogados_cooperacao": lista})
+    con.execute("DELETE FROM advogados_cooperacao")
+    if lista:
+        con.executemany("INSERT INTO advogados_cooperacao(nome, oab_numero, oab_uf) VALUES(%s, %s, %s)",
+                        [(a["nome"], a["oab_numero"], a["oab_uf"]) for a in lista])
+    return lista
+
+
+def cooperacao_do_arquivo() -> list[dict]:
+    """Lista inicial: a do config.json (versões antigas gravavam lá) ou a padrão."""
+    cfg = _arquivo()
+    return _cooperacao(cfg if "advogados_cooperacao" in cfg else {"advogados_cooperacao": COOPERACAO_PADRAO})
+
+
+def advogadas_do_arquivo() -> list[dict]:
+    """Advogadas do config.json antigo (só para o script de migração, se o banco antigo não tiver a tabela)."""
+    cfg = _arquivo()
+    lista = cfg.get("advogadas")
+    if not isinstance(lista, list):
+        lista = [{"nome": cfg.get("nome_advogado", ""), "oab_numero": cfg.get("oab_numero", ""), "oab_uf": cfg.get("oab_uf", "")}]
+    saida = []
+    for i, a in enumerate(x for x in lista if isinstance(x, dict)):
+        oab, uf = str(a.get("oab_numero") or "").strip(), str(a.get("oab_uf") or "").strip().upper()
+        if oab and uf:
+            saida.append({"nome": str(a.get("nome") or "").strip() or f"OAB {oab}/{uf}", "oab_numero": oab, "oab_uf": uf,
+                          "cor": str(a.get("cor") or CORES[i % len(CORES)])})
+    return saida
 
 
 def checklists_padrao() -> dict[str, list[str]]:
@@ -161,16 +195,23 @@ def checklist_padrao(modelo: str = "processo") -> list[str]:
 
 
 def configurar_log() -> None:
-    LOG_DIR.mkdir(exist_ok=True)
-    fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+    """Na tela (stderr) sempre; em logs/app.log só no computador (na Vercel o disco é somente leitura)."""
     raiz = logging.getLogger()
-    if any(isinstance(h, RotatingFileHandler) for h in raiz.handlers):
+    if getattr(raiz, "_configurado_app", False):
         return
-    arq = RotatingFileHandler(LOG_DIR / "app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-    arq.setFormatter(fmt)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s", "%Y-%m-%d %H:%M:%S")
     tela = logging.StreamHandler()
     tela.setFormatter(fmt)
-    raiz.addHandler(arq)
     raiz.addHandler(tela)
+    if not na_vercel():
+        try:
+            from logging.handlers import RotatingFileHandler
+            LOG_DIR.mkdir(exist_ok=True)
+            arq = RotatingFileHandler(LOG_DIR / "app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+            arq.setFormatter(fmt)
+            raiz.addHandler(arq)
+        except OSError:
+            pass
     raiz.setLevel(logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    raiz._configurado_app = True

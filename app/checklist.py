@@ -1,17 +1,17 @@
-"""Checklist das demandas (tarefas da agenda e cards do quadro). Fonte única: os itens ficam só dentro da demanda
-(coluna checklist, JSON); a agenda lê de lá e "marcar como feito" grava de volta no mesmo item.
+"""Checklist das demandas (tarefas do Monitoramento e clientes do Xablau). Fonte única: os itens ficam na tabela
+checklist_itens, ligados à demanda; a agenda lê de lá e "marcar como feito" grava no mesmo item.
 
-Item: {"id", "texto", "feito", "data": "AAAA-MM-DD" | None, "hora": "HH:MM" | None (só com data),
-       "resp": "a:<id da advogada>" | "p:<id da pessoa>" | None}
+Item (como a tela vê): {"id", "texto", "feito", "data": "AAAA-MM-DD" | None, "hora": "HH:MM" | None (só com data),
+                        "resp": "a:<id da advogada>" | "p:<id da pessoa>" | None}
+No banco, "id" é item_id (estável) e "resp" vira advogada_id ou pessoa_id.
 """
-import json
 import re
 import secrets
 from datetime import date
 
 from . import config, db
 
-DONOS = {"tarefa": "tarefas", "card": "quadro_cards"}  # tipo de demanda -> tabela
+DONOS = {"tarefa": "tarefa_id", "card": "cliente_id"}  # tipo de demanda -> coluna em checklist_itens
 
 
 def novo_id() -> str:
@@ -49,11 +49,41 @@ def normalizar(lista) -> list[dict]:
     return saida
 
 
-def ler(valor: str | None) -> list[dict]:
-    try:
-        return normalizar(json.loads(valor)) if valor else []
-    except ValueError:
-        return []
+def _item(r) -> dict:
+    resp = f"a:{r['advogada_id']}" if r["advogada_id"] else (f"p:{r['pessoa_id']}" if r["pessoa_id"] else None)
+    return {"id": r["item_id"], "texto": r["texto"], "feito": r["feito"], "data": r["data"], "hora": r["hora"], "resp": resp}
+
+
+def ler(con, dono: str, ids: list[int] | None = None) -> dict[int, list[dict]]:
+    """Checklists de várias demandas de um tipo de uma vez: {id da demanda: [itens em ordem]}."""
+    coluna = DONOS[dono]
+    sql = f"SELECT * FROM checklist_itens WHERE {coluna} IS NOT NULL"
+    args = []
+    if ids is not None:
+        sql += f" AND {coluna} = ANY(%s)"
+        args.append(list(ids))
+    saida: dict[int, list[dict]] = {}
+    for r in con.execute(sql + f" ORDER BY {coluna}, posicao", args):
+        saida.setdefault(r[coluna], []).append(_item(r))
+    return saida
+
+
+def gravar(con, dono: str, dono_id: int, lista) -> list[dict]:
+    """Substitui a checklist de uma demanda pela lista vinda da tela (já normalizada aqui)."""
+    coluna = DONOS[dono]
+    itens = normalizar(lista)
+    advs = {r[0] for r in con.execute("SELECT id FROM advogadas")}
+    pessoas_ids = {r[0] for r in con.execute("SELECT id FROM pessoas")}
+    con.execute(f"DELETE FROM checklist_itens WHERE {coluna}=%s", (dono_id,))
+    linhas = []
+    for pos, c in enumerate(itens, start=1):
+        tipo, _, num = (c["resp"] or "").partition(":")
+        adv = int(num) if tipo == "a" and int(num) in advs else None
+        pes = int(num) if tipo == "p" and int(num) in pessoas_ids else None
+        linhas.append((dono_id, c["id"], pos, c["texto"], c["feito"], c["data"], c["hora"], adv, pes))
+    con.executemany(f"""INSERT INTO checklist_itens({coluna}, item_id, posicao, texto, feito, data, hora, advogada_id, pessoa_id)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", linhas)
+    return itens
 
 
 def padrao(modelo: str = "processo") -> list[dict]:
@@ -61,24 +91,20 @@ def padrao(modelo: str = "processo") -> list[dict]:
 
 
 def marcar(con, dono: str, dono_id: int, item_id: str, feito: bool) -> bool:
-    """Marca/desmarca um item onde quer que ele seja mostrado (agenda ou card): grava na própria demanda."""
-    tabela = DONOS.get(dono)
-    if not tabela:
+    """Marca/desmarca um item onde quer que ele seja mostrado (agenda ou card): grava no próprio item."""
+    coluna = DONOS.get(dono)
+    if not coluna:
         raise ValueError("Demanda inválida")
-    r = con.execute(f"SELECT checklist FROM {tabela} WHERE id=?", (dono_id,)).fetchone()
-    if not r:
+    cur = con.execute(f"UPDATE checklist_itens SET feito=%s WHERE {coluna}=%s AND item_id=%s",
+                      (bool(feito), dono_id, item_id))
+    if not cur.rowcount:
         return False
-    itens = ler(r["checklist"])
-    item = next((c for c in itens if c["id"] == item_id), None)
-    if not item:
-        return False
-    item["feito"] = bool(feito)
-    con.execute(f"UPDATE {tabela} SET checklist=?, atualizado_em=? WHERE id=?",
-                (json.dumps(itens, ensure_ascii=False), db.agora(), dono_id))
+    tabela = "tarefas" if dono == "tarefa" else "clientes"
+    con.execute(f"UPDATE {tabela} SET atualizado_em=%s WHERE id=%s", (db.agora(), dono_id))
     return True
 
 
-# --- pessoas (responsáveis dos itens): as advogadas do config.json + quem ela cadastrar -----------------
+# --- pessoas (responsáveis dos itens): as advogadas + quem ela cadastrar -----------------
 
 def pessoas(con) -> list[dict]:
     saida = [{"chave": f"a:{a['id']}", "nome": a["nome"].split()[0] if a["nome"] else a["nome"], "nome_completo": a["nome"],
@@ -92,10 +118,10 @@ def adicionar_pessoa(con, nome: str) -> int:
     nome = (nome or "").strip()[:60]
     if not nome:
         raise ValueError("Informe o nome")
-    cur = con.execute("INSERT INTO pessoas(nome, ativo, criado_em) VALUES(?, 1, ?)", (nome, db.agora()))
-    return cur.lastrowid
+    return con.execute("INSERT INTO pessoas(nome, ativo, criado_em) VALUES(%s, true, %s) RETURNING id",
+                       (nome, db.agora())).fetchone()[0]
 
 
 def remover_pessoa(con, pid: int):
     """Só desativa: itens antigos continuam mostrando quem era o responsável."""
-    con.execute("UPDATE pessoas SET ativo=0 WHERE id=?", (pid,))
+    con.execute("UPDATE pessoas SET ativo=false WHERE id=%s", (pid,))

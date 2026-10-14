@@ -7,7 +7,36 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232451b3'/><path d='M9 8h10l4 4v12H9z' fill='white'/><path d='M12 15h8M12 19h8' stroke='%232451b3' stroke-width='2'/></svg>">
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="deslogada">
+  <!-- Login (Supabase Auth): o app só aparece depois de entrar -->
+  <div class="login" id="login">
+    <div class="login-caixa">
+      <div class="login-marca">
+        <svg viewBox="0 0 32 32" width="40" height="40" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M9 8h10l4 4v12H9z" fill="#fff"/><path d="M12 15h8M12 19h8" stroke="currentColor" stroke-width="2"/></svg>
+        <h1>Meus processos</h1>
+      </div>
+      <p class="login-msg" id="login-msg" role="alert" hidden></p>
+      <form id="login-entrar" class="login-form">
+        <label class="rotulo" for="login-email">E-mail</label>
+        <input type="email" id="login-email" class="campo largo-txt" autocomplete="username" required>
+        <label class="rotulo" for="login-senha">Senha</label>
+        <input type="password" id="login-senha" class="campo largo-txt" autocomplete="current-password" required>
+        <button class="btn primario login-botao" id="login-botao" type="submit">Entrar</button>
+        <button class="link pequeno" id="login-esqueci" type="button">Esqueci minha senha</button>
+      </form>
+      <form id="login-nova-senha" class="login-form" hidden>
+        <p class="ajuda">Crie sua senha nova (pelo menos 8 caracteres).</p>
+        <label class="rotulo" for="login-senha-nova">Senha nova</label>
+        <input type="password" id="login-senha-nova" class="campo largo-txt" autocomplete="new-password" minlength="8" required>
+        <button class="btn primario login-botao" type="submit">Salvar senha</button>
+      </form>
+      <div id="login-sem-acesso" class="login-form" hidden>
+        <p id="login-sem-acesso-txt"></p>
+        <button class="btn" id="login-sair" type="button">Sair e entrar com outra conta</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Menu lateral: recolhível (só ícones) no computador; gaveta em tela estreita -->
   <aside class="sidebar" id="sidebar" aria-label="Menu">
     <div class="sb-marca">
@@ -39,9 +68,14 @@
       </button>
     </nav>
     <div class="sb-rodape">
+      <div class="sb-usuaria" id="sb-usuaria"></div>
       <button type="button" class="sb-item" id="btn-config" title="Configurações">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>
         <span class="sb-rotulo">Configurações</span>
+      </button>
+      <button type="button" class="sb-item" id="btn-sair" title="Sair">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4M6 12h10"/></svg>
+        <span class="sb-rotulo">Sair</span>
       </button>
       <button type="button" class="sb-item sb-recolher" id="sb-recolher" title="Recolher menu" aria-label="Recolher menu" aria-expanded="true">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6l-6 6 6 6"/></svg>
@@ -67,6 +101,13 @@
   </header>
 
   <main class="conteudo">
+    <section class="faixa perigo" id="aviso-banco-local" hidden>
+      <strong>Atenção: este computador tem dados que não estão no Supabase.</strong>
+      A pasta <code>db</code> (banco da versão antiga) tem registros diferentes dos que foram migrados. Não apague essa
+      pasta e não cadastre nada novo até migrar (README, seção “Trazer os dados de outro computador”). Se esses dados
+      não importam (ex.: computador de teste), renomeie a pasta <code>db</code> para <code>db-antigo</code>.
+    </section>
+
     <section class="faixa alerta alerta-prazos" id="alerta-prazos" hidden>
       <span id="alerta-prazos-texto"></span>
       <button class="link" type="button" id="alerta-prazos-ver">Ver no Monitoramento</button>
@@ -290,7 +331,8 @@
       <p class="ajuda" id="cfg-ident"></p>
       <div class="rotulo">Advogadas</div>
       <div id="cfg-advogadas"></div>
-      <p class="ajuda">Nome e cor podem ser mudados aqui. Para incluir outra advogada ou mudar a OAB, edite o arquivo config.json.</p>
+      <p class="ajuda">Nome e cor podem ser mudados aqui. Para incluir outra advogada (com o login dela) ou mudar a OAB,
+        use o SQL Editor do Supabase (veja o README).</p>
       <div class="rotulo">Equipe (responsáveis nos itens das checklists)</div>
       <p class="ajuda">As advogadas acima já entram. Acrescente aqui outras pessoas; vale na hora, sem precisar salvar.</p>
       <div id="cfg-pessoas" class="cfg-pessoas"></div>
@@ -503,11 +545,14 @@
 
   <div class="aviso-toast" id="toast" role="status" hidden></div>
 
+  <!-- supabase-js (só o login usa; com a chave pública anon) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="/static/app.js"></script>
   <script src="/static/checklist.js"></script>
   <script src="/static/agenda.js"></script>
   <script src="/static/quadro.js"></script>
   <script src="/static/calendario.js"></script>
   <script src="/static/financeiro.js"></script>
+  <script src="/static/auth.js"></script>
 </body>
 </html>

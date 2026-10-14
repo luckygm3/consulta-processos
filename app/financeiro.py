@@ -109,7 +109,7 @@ def _valores(dados: dict, hoje: date | None = None) -> tuple[dict, list[dict]]:
     lanc = {"cliente": cliente, "numero": numero, "valor_total": total, "entrada": entrada, "entrada_data": entrada_data,
             "valor_parcela": valor_parcela, "qtd_parcelas": qtd,
             "observacoes": (str(dados.get("observacoes") or "").strip()[:2000] or None),
-            "inadimplente": 1 if dados.get("inadimplente") else 0}
+            "inadimplente": bool(dados.get("inadimplente"))}
 
     # Parcelas: as da tela (datas e valores editados um a um) ou, se não vierem, geradas a partir do 1º vencimento
     recebidas = dados.get("parcelas")
@@ -146,66 +146,70 @@ def _valores(dados: dict, hoje: date | None = None) -> tuple[dict, list[dict]]:
     return lanc, parcelas
 
 
+def _cliente_do_quadro(con, nome: str) -> int | None:
+    """Liga o lançamento ao card de Clientes quando há exatamente um cliente com o mesmo nome (sem diferenciar
+    acento, maiúsculas e espaços extras)."""
+    chave = chave_cliente(nome)
+    ids = [r["id"] for r in con.execute("SELECT id, nome FROM clientes") if chave_cliente(r["nome"]) == chave]
+    return ids[0] if len(ids) == 1 else None
+
+
 def salvar(con, dados: dict, lid: int | None = None) -> int:
     lanc, parcelas = _valores(dados)
+    lanc["cliente_id"] = _cliente_do_quadro(con, lanc["cliente"])
     lanc["atualizado_em"] = db.agora()
     if lid:
-        if not con.execute("SELECT 1 FROM lancamentos WHERE id=?", (lid,)).fetchone():
+        if not con.execute("SELECT 1 FROM lancamentos WHERE id=%s", (lid,)).fetchone():
             raise LookupError("Lançamento não encontrado")
-        con.execute(f"UPDATE lancamentos SET {','.join(f'{k}=?' for k in lanc)} WHERE id=?", [*lanc.values(), lid])
-        _apagar_parcelas(con, lid)
+        con.execute(f"UPDATE lancamentos SET {','.join(f'{k}=%s' for k in lanc)} WHERE id=%s", [*lanc.values(), lid])
+        con.execute("DELETE FROM parcelas WHERE lancamento_id=%s", (lid,))  # pagamentos saem junto (cascade)
     else:
         lanc["criado_em"] = lanc["atualizado_em"]
-        lid = con.execute(f"INSERT INTO lancamentos({','.join(lanc)}) VALUES({','.join('?' * len(lanc))})",
-                          list(lanc.values())).lastrowid
+        lid = con.execute(f"INSERT INTO lancamentos({','.join(lanc)}) VALUES({','.join(['%s'] * len(lanc))}) RETURNING id",
+                          list(lanc.values())).fetchone()[0]
     for p in parcelas:
         _, quitou = quitacao(p["valor"], p["pagamentos"])
-        pid = con.execute("INSERT INTO parcelas(lancamento_id, numero, vencimento, valor, pago, pago_em) VALUES(?,?,?,?,?,?)",
-                          (lid, p["numero"], p["vencimento"], p["valor"], 1 if quitou else 0, quitou)).lastrowid
-        con.executemany("INSERT INTO pagamentos(parcela_id, valor, data, criado_em) VALUES(?,?,?,?)",
+        pid = con.execute("""INSERT INTO parcelas(lancamento_id, numero, vencimento, valor, pago, pago_em)
+                             VALUES(%s,%s,%s,%s,%s,%s) RETURNING id""",
+                          (lid, p["numero"], p["vencimento"], p["valor"], bool(quitou), quitou)).fetchone()[0]
+        con.executemany("INSERT INTO pagamentos(parcela_id, valor, data, criado_em) VALUES(%s,%s,%s,%s)",
                         [(pid, g["valor"], g["data"], lanc["atualizado_em"]) for g in p["pagamentos"]])
     return lid
 
 
-def _apagar_parcelas(con, lid: int):
-    con.execute("DELETE FROM pagamentos WHERE parcela_id IN (SELECT id FROM parcelas WHERE lancamento_id=?)", (lid,))
-    con.execute("DELETE FROM parcelas WHERE lancamento_id=?", (lid,))
-
-
 def excluir(con, lid: int):
-    _apagar_parcelas(con, lid)
-    con.execute("DELETE FROM lancamentos WHERE id=?", (lid,))
+    con.execute("DELETE FROM lancamentos WHERE id=%s", (lid,))  # parcelas e pagamentos saem junto (cascade)
 
 
 # --- pagamentos de uma parcela ------------------------------------------------------
 
 def _pagamentos(con, pid: int) -> list[dict]:
-    return [dict(r) for r in con.execute("SELECT id, valor, data FROM pagamentos WHERE parcela_id=? ORDER BY data, id",
+    return [dict(r) for r in con.execute("SELECT id, valor, data FROM pagamentos WHERE parcela_id=%s ORDER BY data, id",
                                          (pid,))]
 
 
 def _mudou(con, pid: int):
     """Depois de mexer no histórico: refaz o resumo da parcela (pago = quitada, pago_em) e a data do lançamento."""
-    valor = con.execute("SELECT valor FROM parcelas WHERE id=?", (pid,)).fetchone()[0]
+    valor = con.execute("SELECT valor FROM parcelas WHERE id=%s", (pid,)).fetchone()[0]
     _, quitou = quitacao(valor, _pagamentos(con, pid))
-    con.execute("UPDATE parcelas SET pago=?, pago_em=? WHERE id=?", (1 if quitou else 0, quitou, pid))
-    con.execute("UPDATE lancamentos SET atualizado_em=? WHERE id=(SELECT lancamento_id FROM parcelas WHERE id=?)",
+    con.execute("UPDATE parcelas SET pago=%s, pago_em=%s WHERE id=%s", (bool(quitou), quitou, pid))
+    con.execute("UPDATE lancamentos SET atualizado_em=%s WHERE id=(SELECT lancamento_id FROM parcelas WHERE id=%s)",
                 (db.agora(), pid))
 
 
 def adicionar_pagamento(con, pid: int, dados: dict) -> int:
     """Lança um pagamento (parcial ou não) na parcela, sem mexer nos que já existem."""
-    if not con.execute("SELECT 1 FROM parcelas WHERE id=?", (pid,)).fetchone():
+    if not con.execute("SELECT 1 FROM parcelas WHERE id=%s", (pid,)).fetchone():
         raise LookupError("Parcela não encontrada")
     g = _pagamento(dados)
-    gid = con.execute("INSERT INTO pagamentos(parcela_id, valor, data, criado_em) VALUES(?,?,?,?)",
-                      (pid, g["valor"], g["data"], db.agora())).lastrowid
+    gid = con.execute("INSERT INTO pagamentos(parcela_id, valor, data, criado_em) VALUES(%s,%s,%s,%s) RETURNING id",
+                      (pid, g["valor"], g["data"], db.agora())).fetchone()[0]
     _mudou(con, pid)
     return gid
 
 
 def _parcela_do_pagamento(con, gid: int) -> int:
-    r = con.execute("SELECT parcela_id FROM pagamentos WHERE id=?", (gid,)).fetchone()
+    r = con.execute("SELECT parcela_id FROM pagamentos WHERE id=%s", (gid,)).fetchone()
     if not r:
         raise LookupError("Pagamento não encontrado")
     return r[0]
@@ -214,30 +218,30 @@ def _parcela_do_pagamento(con, gid: int) -> int:
 def editar_pagamento(con, gid: int, dados: dict):
     pid = _parcela_do_pagamento(con, gid)
     g = _pagamento(dados)
-    con.execute("UPDATE pagamentos SET valor=?, data=? WHERE id=?", (g["valor"], g["data"], gid))
+    con.execute("UPDATE pagamentos SET valor=%s, data=%s WHERE id=%s", (g["valor"], g["data"], gid))
     _mudou(con, pid)
 
 
 def excluir_pagamento(con, gid: int):
     pid = _parcela_do_pagamento(con, gid)
-    con.execute("DELETE FROM pagamentos WHERE id=?", (gid,))
+    con.execute("DELETE FROM pagamentos WHERE id=%s", (gid,))
     _mudou(con, pid)
 
 
 def marcar_paga(con, pid: int, pago: bool, pago_em: str | None = None, hoje: date | None = None) -> bool:
     """Atalho da caixinha "paga": marcar lança um pagamento do que falta (na data informada ou hoje);
     desmarcar apaga o histórico da parcela."""
-    r = con.execute("SELECT valor FROM parcelas WHERE id=?", (pid,)).fetchone()
+    r = con.execute("SELECT valor FROM parcelas WHERE id=%s", (pid,)).fetchone()
     if not r:
         return False
     if pago:
         data = _data(pago_em, "a data do pagamento", obrigatoria=False) or (hoje or date.today()).isoformat()
         falta = r["valor"] - sum(g["valor"] for g in _pagamentos(con, pid))
         if falta > 0:
-            con.execute("INSERT INTO pagamentos(parcela_id, valor, data, criado_em) VALUES(?,?,?,?)",
+            con.execute("INSERT INTO pagamentos(parcela_id, valor, data, criado_em) VALUES(%s,%s,%s,%s)",
                         (pid, falta, data, db.agora()))
     else:
-        con.execute("DELETE FROM pagamentos WHERE parcela_id=?", (pid,))
+        con.execute("DELETE FROM pagamentos WHERE parcela_id=%s", (pid,))
     _mudou(con, pid)
     return True
 
@@ -270,7 +274,7 @@ def listar(con, hoje: date | None = None) -> list[dict]:
     saida = []
     for r in con.execute("""SELECT l.*, pr.partes AS p_partes FROM lancamentos l
                             LEFT JOIN processos pr ON pr.numero = l.numero
-                            ORDER BY l.cliente COLLATE NOCASE, l.id"""):
+                            ORDER BY lower(l.cliente), l.id"""):
         d = dict(r)
         d["numero_fmt"] = cnj.formatar(d["numero"]) if d["numero"] else ""
         d["partes"] = db.resumo_partes(d.pop("p_partes"))
@@ -343,7 +347,7 @@ def resumo(lancamentos: list[dict], mes: str, hoje: date | None = None) -> dict:
 
 def clientes_inadimplentes(con) -> set[str]:
     """Chaves (chave_cliente) dos clientes com algum lançamento marcado como inadimplente."""
-    return {chave_cliente(r[0]) for r in con.execute("SELECT cliente FROM lancamentos WHERE inadimplente=1")}
+    return {chave_cliente(r[0]) for r in con.execute("SELECT cliente FROM lancamentos WHERE inadimplente")}
 
 
 def lembretes(lancamentos: list[dict], de: str, ate: str) -> list[dict]:

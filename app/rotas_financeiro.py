@@ -33,7 +33,7 @@ def atrasadas():
     """Só a contagem (selo do menu lateral). Inadimplentes ficam de fora (têm bloco próprio no painel)."""
     with db.conexao() as con:
         n = con.execute("""SELECT COUNT(*) FROM parcelas p JOIN lancamentos l ON l.id = p.lancamento_id
-                           WHERE p.pago=0 AND p.vencimento < ? AND l.inadimplente=0""",
+                           WHERE NOT p.pago AND p.vencimento < %s AND NOT l.inadimplente""",
                         (date.today().isoformat(),)).fetchone()[0]
     return {"atrasadas": n}
 
