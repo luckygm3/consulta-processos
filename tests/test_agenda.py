@@ -1,12 +1,12 @@
-"""Testes da agenda: tarefa semanal de processo sigiloso, restaurar de Concluídos e checklist padrão.
-Rodar: python -m unittest discover -s tests -t . -v"""
+"""Testes do Monitoramento: sugestão semanal de processo sigiloso e checklist padrão. (Aprovar e rejeitar: em
+test_interligar.py.) Rodar: python -m unittest discover -s tests -t . -v"""
 import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
 from unittest import mock
 
-from app import agenda, config
+from app import agenda, config, interligar
 from tests.supabase_local import TesteComBanco
 
 SEG, QUA, SEG_SEGUINTE = date(2026, 10, 5), date(2026, 10, 7), date(2026, 10, 12)
@@ -40,17 +40,17 @@ class SigilososTest(Base):
         self.assertEqual(agenda.gerar_semanais(con, QUA), 0)
         t = next(x for x in semanais(con) if x["numero"] == SIGILOSO)
         self.assertEqual(t["titulo"], "Verificar processo sigiloso nº 0006493-71.2026.8.16.0030")
-        self.assertEqual((t["prazo_fatal"], t["status"], t["advogada_id"]), ("2026-10-05", "a_fazer", 1))
+        self.assertEqual((t["prazo_fatal"], t["status"], t["advogada_id"]), ("2026-10-05", "sugerido", 1))
 
-    def test_concluir_so_reaparece_na_segunda_seguinte(self):
+    def test_rejeitar_so_reaparece_na_segunda_seguinte(self):
         con = self.banco()
         agenda.gerar_semanais(con, SEG)
         tid = next(x["id"] for x in semanais(con) if x["numero"] == SIGILOSO)
-        agenda.atualizar(con, tid, {"status": "concluido"})
+        interligar.rejeitar(con, [tid])
         self.assertEqual(agenda.gerar_semanais(con, QUA), 0)
         con.execute("DELETE FROM tarefas WHERE id=%s", (tid,))  # excluir também não faz voltar na mesma semana
         self.assertEqual(agenda.gerar_semanais(con, QUA), 0)
-        # segunda seguinte: volta a do concluído; a outra ainda está aberta e não é duplicada
+        # segunda seguinte: volta a rejeitada; a outra ainda aguarda aprovação e não é duplicada
         self.assertEqual(agenda.gerar_semanais(con, SEG_SEGUINTE), 1)
         nova = [x for x in semanais(con) if x["numero"] == SIGILOSO]
         self.assertEqual([x["prazo_fatal"] for x in nova], ["2026-10-12"])
@@ -62,24 +62,15 @@ class SigilososTest(Base):
         self.assertEqual({x["prazo_fatal"] for x in semanais(con)}, {"2026-10-07"})
 
 
-class ConcluidosTest(Base):
-    def test_restaurar_volta_para_a_coluna_de_origem(self):
+class EditarSugestaoTest(Base):
+    def test_editar_nao_muda_o_status(self):
         con = self.banco()
-        tid = agenda.criar(con, {"titulo": "Petição", "status": "aguardando"})
-        agenda.atualizar(con, tid, {"status": "concluido"})
-        r = con.execute("SELECT status, status_anterior, concluido_em FROM tarefas WHERE id=%s", (tid,)).fetchone()
-        self.assertEqual((r["status"], r["status_anterior"]), ("concluido", "aguardando"))
-        self.assertIsNotNone(r["concluido_em"])
-        self.assertTrue(agenda.restaurar(con, tid))
-        r = con.execute("SELECT status, status_anterior, concluido_em FROM tarefas WHERE id=%s", (tid,)).fetchone()
-        self.assertEqual((r["status"], r["status_anterior"], r["concluido_em"]), ("aguardando", None, None))
-        self.assertFalse(agenda.restaurar(con, tid))  # só restaura o que está em Concluídos
-
-    def test_restaurar_sem_origem_vai_para_a_fazer(self):
-        con = self.banco()
-        tid = agenda.criar(con, {"titulo": "Antiga", "status": "concluido"})
-        agenda.restaurar(con, tid)
-        self.assertEqual(con.execute("SELECT status FROM tarefas WHERE id=%s", (tid,)).fetchone()[0], "a_fazer")
+        tid = agenda.criar(con, {"titulo": "Petição", "tipo": "prazo", "prazo_fatal": "2026-10-20"})
+        agenda.atualizar(con, tid, {"titulo": "Réplica", "status": "aprovado", "prazo_fatal": "2026-10-21"})
+        t = agenda.obter(con, tid)
+        self.assertEqual((t["titulo"], t["status"], t["prazo_fatal"]), ("Réplica", "sugerido", "2026-10-21"))
+        with self.assertRaises(ValueError):
+            agenda.atualizar(con, tid, {"cliente_id": 999999})
 
 
 class ChecklistPadraoTest(unittest.TestCase):

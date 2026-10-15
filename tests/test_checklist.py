@@ -35,6 +35,11 @@ class NormalizarTest(unittest.TestCase):
         self.assertEqual(itens[0]["id"], "abc")
         self.assertNotEqual(itens[1]["id"], "abc")
 
+    def test_origem_do_monitoramento(self):
+        itens = checklist.normalizar([{"texto": "A", "origem_id": 12}, {"texto": "B", "origem_id": "13"},
+                                      {"texto": "C", "origem_id": True}, {"texto": "D", "origem_id": "x"}, {"texto": "E"}])
+        self.assertEqual([c["origem_id"] for c in itens], [12, 13, None, None, None])
+
 
 class FonteUnicaTest(Base):
     """Marcar como feito (na agenda ou no card) grava no mesmo item, na própria demanda."""

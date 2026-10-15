@@ -351,18 +351,11 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
   --u-neutro: #8a919c; --u-neutro-fundo: #f3f4f6;
 }
 .ag-topo { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-.ag-visoes { display: flex; align-items: center; gap: 6px; }
-.ag-acoes { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-
-/* Concluídos: só um ícone discreto ao lado das visões (também recebe cartões arrastados) */
-.ag-icone {
-  display: inline-grid; place-items: center; width: 38px; height: 38px; padding: 0;
-  border: 1px solid transparent; border-radius: 8px; background: none; color: var(--fraco); cursor: pointer;
-  transition: color .15s, background .15s, border-color .15s, transform .15s;
-}
-.ag-icone:hover { color: var(--suave); background: #eceef2; }
-.ag-icone.ativa { color: var(--primaria); background: var(--primaria-clara); }
-.ag-icone.alvo { color: var(--primaria); background: var(--primaria-clara); border-color: var(--primaria); transform: scale(1.12); }
+.ag-acoes { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-left: auto; }
+/* seleção em lote das sugestões */
+.ag-lote { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: .9rem; }
+.ag-lote[hidden] { display: none; }
+.ag-lote .chk input { width: 16px; height: 16px; }
 
 /* Ações pouco usadas: escondidas; aparecem com fade + leve slide ao passar o mouse na barra (ou tocar no ⋯) */
 .ag-mais {
@@ -386,33 +379,9 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
   .ag-topo:hover .ag-mais { color: var(--suave); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ag-extras, .ag-mais, .ag-icone { transition: none; }
+  .ag-extras, .ag-mais { transition: none; }
 }
-
-/* botão redondo de concluir (cartão e lista): aparece ao passar o mouse; em tela de toque, sempre */
-.concluir {
-  display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; flex: none;
-  border: 1.5px solid var(--borda-forte); border-radius: 50%; background: var(--cartao); color: transparent;
-  cursor: pointer; transition: color .15s, border-color .15s, background .15s, opacity .15s;
-}
-.concluir:hover, .concluir:focus-visible { color: #fff; background: var(--u-folgado); border-color: var(--u-folgado); }
 .cartao { position: relative; }
-.cartao .concluir { position: absolute; top: 7px; right: 7px; opacity: 0; }
-.cartao:hover .concluir, .cartao .concluir:focus-visible { opacity: 1; }
-.cartao .c-topo { padding-right: 24px; }
-@media (hover: none) { .cartao .concluir { opacity: 1; } }
-
-/* vista Concluídos */
-.ag-feitas { max-width: 1100px; }
-.feitas-cab { display: flex; align-items: baseline; gap: 14px; margin: 4px 2px 10px; }
-.feitas-cab h3 { margin: 0; font-size: 1.05rem; }
-.feitas-cab .qtd { color: var(--suave); font-weight: 500; }
-.feita { display: grid; grid-template-columns: minmax(0, 1fr) auto 90px auto; gap: 12px; align-items: center;
-  background: var(--cartao); border: 1px solid var(--borda); border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; }
-.feita-txt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; min-width: 0; }
-.feita .li-titulo { color: var(--suave); }
-.feita-quando { color: var(--fraco); font-size: .85rem; white-space: nowrap; }
-.feita-acoes { display: flex; gap: 6px; }
 
 /* cores por urgência: borda esquerda + rótulo */
 .u-vencido { --u: var(--u-vencido); --uf: var(--u-vencido-fundo); }
@@ -428,17 +397,13 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .col-cab h3 { margin: 0; font-size: .95rem; }
 .col-cab small { color: var(--fraco); font-size: .75rem; }
 .col-cab .qtd { color: var(--suave); font-weight: 500; }
-.col-lote { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; padding: 0 4px 8px; font-size: .85rem; }
-.col-lote .chk input { width: 15px; height: 15px; }
 .col-cartoes { display: flex; flex-direction: column; gap: 8px; min-height: 60px; }
-.col-vazia { text-align: center; padding: 16px 0; margin: 0; }
 .perigo-txt { color: var(--erro); }
 
 .cartao { background: var(--cartao); border-radius: 8px; padding: 9px 11px; box-shadow: var(--sombra);
   border-left: 4px solid var(--u); cursor: grab; font-size: .92rem; }
 .cartao:hover { box-shadow: 0 2px 8px rgba(16, 24, 40, .14); }
 .cartao.arrastando { opacity: .45; }
-.c-topo { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-bottom: 4px; }
 .c-urg { font-size: .75rem; font-weight: 700; color: var(--u); background: var(--uf); padding: 0 7px; border-radius: 99px; white-space: nowrap; }
 .c-tag { font-size: .7rem; font-weight: 600; color: var(--suave); border: 1px solid var(--borda-forte); padding: 0 6px; border-radius: 99px; }
 .c-tag.prio { color: var(--erro); border-color: #f1b4ad; }
@@ -449,12 +414,8 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .c-prog { flex: none; font-size: .78rem; color: var(--fraco); font-variant-numeric: tabular-nums; }
 .c-proc { font-size: .85rem; font-variant-numeric: tabular-nums; margin-top: 2px; text-align: left; }
 .c-partes { color: var(--suave); font-size: .82rem; line-height: 1.3; }
-.c-datas { margin-top: 4px; font-size: .85rem; color: var(--suave); }
-.c-datas b { color: var(--texto); }
 .c-rodape { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin-top: 6px; }
-.c-check, .c-def { font-size: .78rem; color: var(--suave); }
 .c-aviso { margin-top: 6px; font-size: .78rem; font-weight: 600; color: var(--novo); background: var(--novo-fundo); padding: 2px 6px; border-radius: 6px; }
-.c-acoes { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 /* "Editar": só aparece ao passar o mouse no card (sempre, em tela de toque); clique no resto do card contrai/expande */
 .c-editar {
   margin-left: auto; padding: 0 6px; border: 0; border-radius: 4px; background: none;
@@ -531,7 +492,6 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
   color: var(--texto); font-size: .76rem; padding: 2px 5px; border-radius: 4px; cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cal-grade.semana .cal-chip { white-space: normal; }
-.cal-chip.interno { background: transparent; border: 1px dashed var(--borda-forte); color: var(--suave); }
 /* prazo fatal de card do quadro: destaque leve (contorno, sem fundo); item de checklist: só texto, mais leve ainda */
 .cal-chip.cal-prazo-card { background: var(--cartao); box-shadow: inset 0 0 0 1px var(--borda); }
 .it-pai { color: var(--fraco); }
@@ -544,29 +504,31 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .cal-item .it-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cal-grade.semana .cal-item .it-txt { white-space: normal; }
 .cal-item.feito .it-txt { color: var(--fraco); text-decoration: line-through; }
+/* tarefa do cliente (aprovada no Monitoramento ou criada em "+ Nova tarefa"): cor da urgência, como um prazo */
+.cal-item.cal-tarefa { border-left: 3px solid var(--u); background: var(--uf); color: var(--texto); }
+.cal-item.cal-tarefa:hover { filter: brightness(.97); }
+.cal-item.cal-tarefa.feito { background: transparent; border-left-color: var(--borda-forte); }
 
-/* lista */
+/* Monitoramento: lista de sugestões aguardando aprovação, por data */
 .ag-lista { display: flex; flex-direction: column; gap: 14px; }
 .lista-grupo h3 { margin: 0 0 6px; font-size: 1rem; }
 .lista-grupo h3 small { color: var(--fraco); font-weight: 500; }
-.lista-item { display: grid; grid-template-columns: 22px 170px minmax(0, 2fr) 240px 160px minmax(0, 1fr); gap: 10px; align-items: center;
-  background: var(--cartao); border: 1px solid var(--borda); border-left: 4px solid var(--u); border-radius: 8px;
-  padding: 8px 12px; margin-bottom: 6px; cursor: pointer; }
-.lista-item:hover { background: #f7f9fc; }
-.lista-item .concluir { opacity: .55; }
-.lista-item:hover .concluir { opacity: 1; }
-.lista-item.lista-prazo-card { background: transparent; }
-.lista-ck {
-  display: grid; grid-template-columns: 22px 170px minmax(0, 1fr) auto; gap: 10px; align-items: center;
-  margin: 0 0 4px; padding: 3px 12px; border-radius: 8px; color: var(--suave); font-size: .9rem; cursor: pointer;
-}
-.lista-ck:hover { background: #f7f9fc; color: var(--texto); }
-.lista-ck .ck-ag { justify-self: center; width: 16px; height: 16px; margin: 0; accent-color: var(--primaria); }
-.lista-ck .it-hora { color: var(--fraco); font-variant-numeric: tabular-nums; }
-.lista-item .c-urg { justify-self: start; }
-.lista-item .c-proc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.sug { display: grid; grid-template-columns: 22px 136px minmax(0, 1fr) auto auto; gap: 6px 12px;
+  align-items: center; background: var(--cartao); border: 1px solid var(--borda); border-left: 4px solid var(--u);
+  border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; cursor: pointer; }
+.sug:hover { background: #f7f9fc; }
+.sug .c-urg { justify-self: start; }
+.sug-txt { min-width: 0; }
+.sug-txt .c-tag { margin-left: 4px; vertical-align: 1px; }
+.sug-txt .c-aviso { display: inline-block; }
+.sug-sub { margin-top: 2px; font-size: .85rem; color: var(--suave); overflow-wrap: anywhere; }
+.sug-sub b { color: var(--texto); font-weight: 600; }
+.sug-sub .c-proc { width: auto; margin: 0; font-size: .85rem; white-space: nowrap; }
+.sug-sub .c-partes { font-size: .85rem; }
+.sug-destino { margin-top: 2px; font-size: .82rem; color: var(--primaria); }
+.sug-destino.falta { color: var(--novo); font-weight: 600; }
+.sug-acoes { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .li-titulo { font-weight: 600; }
-.li-status { color: var(--suave); font-size: .88rem; }
 .li-adv { display: flex; gap: 4px; flex-wrap: wrap; }
 
 /* diálogo da tarefa, feriados e tipos */
@@ -675,11 +637,10 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 @media (max-width: 960px) {
   .kanban { grid-template-columns: repeat(4, 82vw); }
   .kanban.quadro { grid-template-columns: repeat(5, 82vw); }
-  .lista-item { grid-template-columns: 1fr; gap: 2px; }
-  .lista-ck { grid-template-columns: 22px 1fr; }
-  .lista-ck .it-hora, .lista-ck .li-adv { grid-column: 2; }
+  .sug { grid-template-columns: 22px minmax(0, 1fr); }
+  .sug > :not(.c-sel) { grid-column: 2; }
+  .sug-acoes { justify-content: flex-start; }
   .ck-detalhe { padding-left: 0; }
-  .feita { grid-template-columns: 1fr; gap: 4px; }
   .grade-form { grid-template-columns: 1fr; }
   .cal-dia { min-height: 70px; }
   .cal-chip { font-size: .68rem; }
@@ -775,6 +736,14 @@ body.sb-recolhida .sb-qtd { position: absolute; top: 3px; left: 30px; min-width:
 .sit-atrasada { color: var(--u-vencido); background: var(--u-vencido-fundo); }
 .sit-parcial { color: var(--u-ate5); background: var(--u-ate5-fundo); }
 .selo-inad { white-space: nowrap; background: #f7f2f2; color: #8f3b3b; border-color: #e6cfcf; letter-spacing: .02em; font-weight: 650; }
+/* card criado sozinho para um processo: falta ela conferir o nome e preencher os dados */
+.selo-completar { white-space: nowrap; background: var(--novo-fundo); color: var(--novo); border-color: var(--novo-borda); font-weight: 650; }
+.c-sug { display: block; margin-top: 6px; font-size: .8rem; font-weight: 600; color: var(--primaria); text-align: left; }
+#qc-completar { margin: 0 0 6px; }
+#qc-padrao { margin-top: 6px; }
+/* item do checklist que veio do Monitoramento (prazo, audiência, tarefa) */
+.ck-orig { font-size: .72rem; color: var(--suave); border: 1px solid var(--borda-forte); border-radius: 99px; padding: 0 6px;
+  white-space: nowrap; }
 
 /* pagamentos de uma parcela: resumo, histórico, "+" e o mini-formulário */
 .pg-cel { min-width: 170px; overflow-wrap: normal; }

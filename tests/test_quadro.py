@@ -3,7 +3,7 @@ import unittest
 from datetime import date
 from unittest import mock
 
-from app import agenda, quadro
+from app import agenda, interligar, quadro
 from tests.supabase_local import TesteComBanco
 
 CADASTRADO = "00064937120268160030"   # número CNJ válido, já na lista de processos
@@ -58,8 +58,10 @@ class QuadroTest(Base):
 
     def test_checklist_guardada(self):
         con = self.banco()
-        lista = [{"id": "a1", "texto": "Reunião de Briefing", "feito": True, "data": "2026-10-20", "hora": "14:00", "resp": "a:1"},
-                 {"id": "b2", "texto": "Solicitar Documentos", "feito": False, "data": None, "hora": None, "resp": None}]
+        lista = [{"id": "a1", "texto": "Reunião de Briefing", "feito": True, "data": "2026-10-20", "hora": "14:00", "resp": "a:1",
+                  "origem_id": None},
+                 {"id": "b2", "texto": "Solicitar Documentos", "feito": False, "data": None, "hora": None, "resp": None,
+                  "origem_id": None}]
         cid = quadro.criar(con, {"titulo": "Ana", "coluna_id": 1, "tipo": "inicial", "checklist": lista})
         self.assertEqual(cards(con)[0]["checklist"], lista)
         quadro.atualizar(con, cid, {"checklist": lista[::-1]})
@@ -89,19 +91,20 @@ class PrazoFatalTest(Base):
         p = self.prazo(con, "Bruno")
         self.assertEqual((p["tipo"], p["descricao"], p["data"], p["hora"]), ("interno", "Entregar parecer", "2026-10-09", "18:00"))
         self.assertEqual(p["urgencia"], "ate5")
-        # virou processo: o prazo interno sai (passa a valer o processual, que vem da agenda)
+        # virou processo: o prazo interno sai (passa a valer o processual, que vem do Monitoramento)
         quadro.atualizar(con, cid, {"tipo": "processo", "numero": CADASTRADO, "prazo_data": "2026-10-09"})
         self.assertIsNone(self.prazo(con, "Bruno"))
         with self.assertRaises(ValueError):
             quadro.criar(con, {"titulo": "X", "coluna_id": 1, "tipo": "inicial", "prazo_data": "2026-13-01"})
 
-    def test_processual_vem_da_agenda(self):
+    def test_processual_vem_do_monitoramento(self):
         con = self.banco()
         quadro.criar(con, {"titulo": "Ana", "coluna_id": 1, "numero": CADASTRADO})
         self.assertIsNone(self.prazo(con, "Ana"))
-        nova = lambda titulo, data, status="a_fazer": agenda.criar(con, {  # noqa: E731
-            "titulo": titulo, "tipo": "prazo", "status": status, "numero": CADASTRADO, "prazo_fatal": data})
-        nova("Sugestão velha", "2026-09-01", "sugerido")       # sugestão vencida: não conta
+        nova = lambda titulo, data, aprovar=True: [  # noqa: E731
+            interligar.aprovar(con, [tid]) if aprovar else None for tid in [agenda.criar(con, {
+                "titulo": titulo, "tipo": "prazo", "numero": CADASTRADO, "prazo_fatal": data})]]
+        nova("Sugestão velha", "2026-09-01", False)            # sugestão vencida: não conta
         self.assertIsNone(self.prazo(con, "Ana"))
         nova("Réplica", "2026-09-20")                          # vencido em aberto: vale enquanto não houver futuro
         self.assertEqual(self.prazo(con, "Ana")["descricao"], "Réplica")

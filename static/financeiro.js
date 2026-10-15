@@ -508,7 +508,7 @@ async function salvarLancamento() {
     parcelas: fin.linhas.map((p) => ({ numero: p.numero, vencimento: p.vencimento, valor: p.valor, pagamentos: p.pagamentos })),
   };
   try {
-    if (fin.editando) await api(`/api/financeiro/lancamentos/${fin.editando.id}`, { method: "PUT", body: JSON.stringify(d) });
+    if (fin.editando) await salvarConferindo(`/api/financeiro/lancamentos/${fin.editando.id}`, "PUT", d, fin.editando, "Este lançamento foi alterado");
     else await api("/api/financeiro/lancamentos", { method: "POST", body: JSON.stringify(d) });
     $("#dlg-lancamento").close();
     toast(fin.editando ? "Lançamento salvo." : "Lançamento criado: os vencimentos já estão na Agenda.");

@@ -165,41 +165,30 @@
     <div class="vazio" id="vazio" hidden></div>
     </div>
 
-    <!-- Agenda / Kanban de prazos -->
+    <!-- Monitoramento: sugestões do sistema aguardando aprovação (aprovada vira item do checklist do cliente) -->
     <div id="tela-agenda" hidden>
       <div class="ag-topo" id="ag-topo">
-        <div class="ag-visoes">
-          <div class="abas" id="ag-visao" role="tablist">
-            <button type="button" data-visao="kanban" class="ativa">Kanban</button>
-            <button type="button" data-visao="lista">Lista por data</button>
-          </div>
-          <button class="ag-icone" type="button" id="ag-concluidos" title="Concluídos" aria-label="Concluídos" aria-pressed="false">
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 7h16M10 11v6M14 11v6M5.5 7l1 12a2 2 0 0 0 2 1.8h7a2 2 0 0 0 2-1.8l1-12M9 7V4.8A.8.8 0 0 1 9.8 4h4.4a.8.8 0 0 1 .8.8V7"/>
-            </svg>
-          </button>
+        <div class="ag-lote" id="ag-lote">
+          <label class="chk"><input type="checkbox" id="ag-sel-todos"> todas</label>
+          <button class="btn mini primario" type="button" data-lote="aprovar">✓ Aprovar selecionadas</button>
+          <button class="btn mini perigo" type="button" data-lote="rejeitar">Rejeitar selecionadas</button>
         </div>
         <div class="ag-acoes">
           <button class="ag-mais" type="button" id="ag-mais" title="Mais opções" aria-label="Mais opções" aria-expanded="false" aria-controls="ag-extras">⋯</button>
           <div class="ag-extras" id="ag-extras">
-            <button class="btn" type="button" id="ag-ics">Exportar .ics</button>
             <button class="btn" type="button" id="ag-feriados">Feriados</button>
             <button class="btn" type="button" id="ag-tipos">Tipos de ato</button>
           </div>
-          <button class="btn" type="button" id="ag-nova">+ Nova tarefa</button>
           <button class="btn primario" type="button" id="ag-verificar">✓ Verificar prazos</button>
         </div>
       </div>
-      <section class="filtros" aria-label="Filtros da agenda">
+      <section class="filtros" aria-label="Filtros do monitoramento">
         <select id="ag-f-adv" class="campo"><option value="">Todas as advogadas</option></select>
         <input type="search" id="ag-f-proc" class="campo" list="ag-processos" placeholder="Processo (número ou parte)" autocomplete="off">
         <datalist id="ag-processos"></datalist>
         <button class="link" id="ag-limpar" type="button" hidden>Limpar filtros</button>
-        <button class="texto-btn empurra" id="ag-expandir" type="button"></button>
       </section>
-      <div id="ag-kanban" class="kanban"></div>
-      <div id="ag-lista" class="ag-lista" hidden></div>
-      <div id="ag-feitas" class="ag-feitas" hidden></div>
+      <div id="ag-lista" class="ag-lista"></div>
     </div>
 
     <!-- Quadro de clientes (aba com nome em quadro.js) -->
@@ -208,7 +197,7 @@
       <div id="qd-kanban" class="kanban quadro"></div>
     </div>
 
-    <!-- Agenda: calendário único (monitoramento, checklists, aniversários e parcelas) -->
+    <!-- Agenda: calendário único (tarefas e checklists dos clientes, aniversários e parcelas) -->
     <div id="tela-calendario" hidden>
       <div class="cal-topo">
         <div class="cal-nav">
@@ -223,17 +212,20 @@
             <button type="button" data-modo="mes" class="ativa">Mês</button>
             <button type="button" data-modo="semana">Semana</button>
           </div>
+          <button class="btn" type="button" id="cal-ics" title="Arquivo para importar no Google Agenda">Exportar .ics</button>
+          <button class="btn primario" type="button" id="cal-nova">+ Nova tarefa</button>
         </div>
       </div>
       <div class="cal-fontes" id="cal-fontes" role="group" aria-label="O que mostrar">
-        <button type="button" class="fonte f-monit" data-fonte="monitoramento" aria-pressed="true">Monitoramento</button>
+        <button type="button" class="fonte f-monit" data-fonte="monitoramento" aria-pressed="true" title="Aprovadas no Monitoramento ou criadas em “+ Nova tarefa”">Prazos e tarefas</button>
         <button type="button" class="fonte f-cli" data-fonte="clientes" aria-pressed="true">Checklists dos clientes</button>
         <button type="button" class="fonte f-aniv" data-fonte="aniversarios" aria-pressed="true">Aniversários</button>
         <button type="button" class="fonte f-fin" data-fonte="financeiro" aria-pressed="true">Financeiro</button>
       </div>
       <div class="cal-grade" id="cal-grade"></div>
-      <p class="ajuda">Dois cliques num dia criam uma tarefa de monitoramento com essa data. Contorno tracejado = data interna.
-        Parcelas aparecem no dia seguinte ao vencimento, para conferir se foram pagas.</p>
+      <p class="ajuda">Dois cliques num dia criam uma tarefa com essa data no checklist de um cliente. Sugestões do sistema só
+        aparecem aqui depois de aprovadas no Monitoramento. Parcelas aparecem no dia seguinte ao vencimento, para conferir se
+        foram pagas.</p>
     </div>
 
     <!-- Financeiro -->
@@ -360,7 +352,7 @@
     </form>
   </dialog>
 
-  <!-- Tarefa / prazo (criar, editar, confirmar sugestão) -->
+  <!-- Tarefa / prazo: sugestão do Monitoramento (aprovar, rejeitar, ajustar antes) ou tarefa nova (vai direto ao cliente) -->
   <dialog id="dlg-tarefa" class="dialogo largo">
     <form method="dialog" id="form-tarefa">
       <h2 id="t-titulo-dlg">Tarefa</h2>
@@ -369,14 +361,11 @@
         <label class="rotulo col2">Título <input type="text" id="t-titulo" class="campo largo-txt" required></label>
         <label class="rotulo">Tipo
           <select id="t-tipo" class="campo"><option value="prazo">Prazo</option><option value="tarefa">Tarefa</option><option value="audiencia">Audiência</option></select></label>
-        <label class="rotulo">Status <select id="t-status" class="campo"></select></label>
         <label class="rotulo">Processo (opcional) <input type="text" id="t-numero" class="campo" list="ag-processos" placeholder="0000000-00.0000.0.00.0000" autocomplete="off"></label>
+        <label class="rotulo col2">Vai para o checklist do cliente <select id="t-cliente" class="campo"></select></label>
         <label class="rotulo">Responsável <select id="t-adv" class="campo"></select></label>
-        <label class="rotulo"><span>Prazo fatal <span class="pz-rotulo" id="t-prazo-tipo"></span></span><input type="date" id="t-fatal" class="campo"></label>
-        <label class="rotulo">Data interna <input type="date" id="t-interna" class="campo"></label>
-        <label class="rotulo">Hora (audiência) <input type="time" id="t-hora" class="campo"></label>
-        <label class="rotulo">Prioridade
-          <select id="t-prio" class="campo"><option value="alta">Alta</option><option value="media">Média</option><option value="baixa">Baixa</option></select></label>
+        <label class="rotulo"><span>Data (prazo fatal) <span class="pz-rotulo" id="t-prazo-tipo"></span></span><input type="date" id="t-fatal" class="campo"></label>
+        <label class="rotulo">Hora <input type="time" id="t-hora" class="campo"></label>
       </div>
       <fieldset class="calc-box">
         <legend>Calcular prazo</legend>
@@ -394,18 +383,16 @@
         <div class="ev-links"><a id="t-link" target="_blank" rel="noopener" hidden>Ver publicação no tribunal ↗</a>
           <button class="link" type="button" id="t-abrir-proc">Abrir processo</button></div>
       </div>
-      <label class="rotulo">Observações <textarea id="t-obs" rows="3"></textarea></label>
-      <div class="ck-modelos" id="t-modelo" hidden>Modelo da checklist
-        <span class="abas"><button type="button" data-modelo="processo">Processo</button><button type="button" data-modelo="preventivo">Preventivo / consultoria</button></span></div>
-      <div id="t-checklist"></div>
+      <div class="nota" id="t-obs" hidden></div>
+      <p class="ajuda" id="t-explica"></p>
       <p class="ajuda aviso-prazo">Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal.</p>
+      <div class="nota erro" id="t-erro" hidden></div>
       <div class="dialogo-acoes">
-        <button class="btn perigo" type="button" id="t-excluir">Excluir</button>
+        <button class="btn perigo" type="button" id="t-excluir">Rejeitar</button>
         <span class="espaco"></span>
-        <button class="btn" type="button" id="t-concluir">✓ Concluir</button>
         <button class="btn" value="cancelar" type="submit" formnovalidate>Cancelar</button>
-        <button class="btn" type="button" id="t-salvar">Salvar</button>
-        <button class="btn primario" type="button" id="t-confirmar" hidden>Confirmar prazo</button>
+        <button class="btn" type="button" id="t-salvar">Salvar sem aprovar</button>
+        <button class="btn primario" type="button" id="t-confirmar">✓ Aprovar</button>
       </div>
     </form>
   </dialog>
@@ -414,6 +401,8 @@
   <dialog id="dlg-card" class="dialogo largo">
     <form method="dialog">
       <h2 id="qc-titulo-dlg">Cliente</h2>
+      <div class="nota" id="qc-completar" hidden>Criado sozinho a partir do processo, com o nome das partes. Confira o nome
+        do cliente, preencha o que faltar e salve (o selo “completar dados” sai).</div>
       <div class="qc-linha">
         <label class="rotulo qc-cliente">Cliente <input type="text" id="qc-titulo" class="campo largo-txt" autocomplete="off"></label>
         <label class="rotulo">Aniversário <input type="date" id="qc-aniv" class="campo" aria-describedby="qc-aniv-ajuda"></label>
@@ -437,6 +426,7 @@
         <span class="pz-rotulo"><span class="pz pz-interno"></span>interno</span>
       </div>
       <div id="qc-checklist"></div>
+      <button class="link pequeno" type="button" id="qc-padrao" hidden>+ Inserir checklist padrão</button>
       <div class="nota erro" id="qc-erro" hidden></div>
       <div class="dialogo-acoes">
         <button class="btn perigo" type="button" id="qc-excluir">Excluir</button>

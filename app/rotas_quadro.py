@@ -1,7 +1,7 @@
 """Rotas do quadro de clientes."""
 from fastapi import APIRouter, Body, HTTPException
 
-from . import cnj, db, quadro
+from . import cnj, db, interligar, quadro
 
 rotas = APIRouter(prefix="/api/quadro")
 
@@ -16,6 +16,7 @@ def _ou_400(fn, *args):
 @rotas.get("")
 def carregar():
     with db.conexao() as con:
+        interligar.migrar(con)  # uma vez só (ver interligar.py): a tela pode pedir o quadro antes de /api/estado
         return quadro.carregar(con)
 
 

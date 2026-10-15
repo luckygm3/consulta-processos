@@ -1,10 +1,12 @@
 "use strict";
 // Agenda: calendário único. Junta, sem copiar nada, o que já existe em cada lugar:
-// - Monitoramento: prazo fatal e data interna das tarefas, e os itens com data das checklists delas;
-// - Clientes: itens com data das checklists dos cards e o prazo fatal interno do card;
+// - Prazos e tarefas (fonte "monitoramento"): itens dos clientes que vieram de uma sugestão aprovada no Monitoramento
+//   ou de "+ Nova tarefa", com a cor da urgência;
+// - Checklists dos clientes: os outros itens com data dos cards e o prazo fatal interno do card;
 // - Aniversários: "Parabenizar <cliente>" todo ano, com "feito" por ano;
 // - Financeiro: lembrete de cada parcela 1 dia depois do vencimento, para conferir se foi paga (a parcial, pelo que falta).
-// Usa helpers de app.js, agenda.js (dataBr, itemAgendaHTML, prazoCardHTML, entradasDe, abrirTarefa…) e quadro.js.
+// Sugestões ainda não aprovadas não aparecem. Usa helpers de app.js, agenda.js (dataBr, itemAgendaHTML, prazoCardHTML,
+// entradasDe, abrirTarefa…) e quadro.js.
 
 const FONTES = ["monitoramento", "clientes", "aniversarios", "financeiro"];
 const cal = { ref: new Date(), modo: "mes", dados: null, feriados: [], fontes: lerFontesCalendario() };
@@ -46,11 +48,6 @@ async function carregarCalendario() {
   renderCalendarioUnico(datas);
 }
 
-// tarefa do monitoramento é "dela" se ela é a responsável, se (sem responsável) atua no processo, ou se tem item com ela
-function tarefaDaAdvogada(t, id) {
-  return !id || t.advogada_id === id || (!t.advogada_id && t.advogadas_processo.includes(id)) || temItemDe(t.checklist, id);
-}
-
 function aniversarioHTML(a) {
   return `<div class="cal-item cal-aniv ${a.feito ? "feito" : ""}" data-aniv="${esc(a.chave)}" data-card="${a.card_id}"
       role="button" tabindex="0" title="Aniversário de ${esc(a.cliente)} — clique para abrir o cliente">
@@ -84,12 +81,11 @@ function renderCalendarioUnico(datas) {
 
   const adv = Number($("#cal-adv").value) || null;
   const ver = (f) => cal.fontes.has(f);
-  const tarefas = d.tarefas.filter((t) => t.status !== "concluido" && t.status !== "descartado" && tarefaDaAdvogada(t, adv));
-  const { itens, prazos } = entradasDe(d.tarefas, d.cards, { adv: adv || "", proc: "" });
+  const { itens, prazos } = entradasDe(d.cards, { adv: adv || "", proc: "" });
   const agrupar = (xs, campo = "data") => xs.reduce((m, x) => (x[campo] && (m[x[campo]] ||= []).push(x), m), {});
-  const fatais = ver("monitoramento") ? agrupar(tarefas, "prazo_fatal") : {};
-  const internas = ver("monitoramento") ? agrupar(tarefas.filter((t) => t.data_interna !== t.prazo_fatal), "data_interna") : {};
-  const itensDia = agrupar(itens.filter((c) => ver(c.pai.dono === "card" ? "clientes" : "monitoramento")));
+  // tarefa (veio do Monitoramento ou de "+ Nova tarefa") primeiro, com a cor da urgência; depois os itens comuns
+  const tarefasDia = ver("monitoramento") ? agrupar(itens.filter((c) => c.tipo)) : {};
+  const itensDia = ver("clientes") ? agrupar(itens.filter((c) => !c.tipo)) : {};
   const prazosDia = ver("clientes") ? agrupar(prazos) : {};
   const anivDia = ver("aniversarios") ? agrupar(d.aniversarios) : {};
   const parcDia = ver("financeiro") ? agrupar(d.parcelas) : {};
@@ -100,16 +96,14 @@ function renderCalendarioUnico(datas) {
     const dt = new Date(iso + "T12:00:00");
     const fora = cal.modo === "mes" && dt.getMonth() !== ref.getMonth();
     const fer = cal.feriados.filter((f) => f.data === iso);
-    const chips = (fatais[iso] || []).map((t) =>
-      `<button type="button" class="cal-chip u-${t.urgencia}" data-id="${t.id}" title="${esc(t.titulo)}${t.numero_fmt ? " — " + esc(t.numero_fmt) : ""}">${t.tipo === "audiencia" ? "" : marcaPrazo(t.prazo_tipo)}${t.hora && !t.titulo.includes(t.hora) ? esc(t.hora) + " " : ""}${esc(t.titulo)}</button>`);
-    const ints = (internas[iso] || []).map((t) =>
-      `<button type="button" class="cal-chip interno" data-id="${t.id}" title="Data interna: ${esc(t.titulo)}">↳ ${esc(t.titulo)}</button>`);
-    const pzs = (prazosDia[iso] || []).map((p) => prazoCardHTML(p, "cal"));
+    const porHora = (xs) => (xs || []).sort((a, b) => (a.hora || "99").localeCompare(b.hora || "99")).map(itemAgendaHTML);
+    const tfs = porHora(tarefasDia[iso]);
+    const pzs = (prazosDia[iso] || []).map(prazoCardHTML);
     const anivs = (anivDia[iso] || []).map(aniversarioHTML);
     const parcs = (parcDia[iso] || []).map(parcelaHTML);
-    const its = (itensDia[iso] || []).sort((a, b) => (a.hora || "99").localeCompare(b.hora || "99")).map((c) => itemAgendaHTML(c, "cal-item"));
+    const its = porHora(itensDia[iso]);
     // no mês, dia cheio mostra os 4 primeiros e "+N mais" (abre o resto ali mesmo)
-    const todos = [...chips, ...pzs, ...ints, ...anivs, ...parcs, ...its];
+    const todos = [...tfs, ...pzs, ...anivs, ...parcs, ...its];
     const limite = cal.modo === "mes" && todos.length > 5 ? 4 : todos.length;
     const resto = todos.length - limite;
     return `<div class="cal-dia ${fora ? "fora" : ""} ${iso === hoje ? "hoje" : ""} ${fer.length || dt.getDay() % 6 === 0 ? "nao-util" : ""}" data-dia="${iso}">
@@ -204,23 +198,91 @@ function ligarCalendario() {
     if (entrada) {
       const donoId = Number(entrada.dataset.donoId);
       if (alvo.classList.contains("ck-ag")) marcarItem(entrada.dataset.dono, donoId, entrada.dataset.item, alvo.checked);
-      else abrirPai(entrada.dataset.dono, donoId, cal.dados.tarefas);
-      return;
+      else abrirPai(entrada.dataset.dono, donoId);
     }
-    const chip = alvo.closest("[data-id]");
-    if (chip) abrirTarefa(cal.dados.tarefas.find((t) => t.id === Number(chip.dataset.id)));
   });
   tela.addEventListener("keydown", (ev) => {
     if (ev.key !== "Enter" || ev.target.matches("input")) return;
     const el = ev.target.closest("[data-aniv], [data-parcela], [data-dono]");
     if (el) el.click();
   });
+  // tarefa nova: vai direto para o checklist de um cliente (dois cliques num dia já trazem a data)
+  const advFiltro = () => Number($("#cal-adv").value) || null;
+  $("#cal-nova").onclick = () => abrirTarefa(null, { advogada_id: advFiltro() });
   $("#cal-grade").addEventListener("dblclick", (ev) => {
     const dia = ev.target.closest("[data-dia]");
-    if (dia && !ev.target.closest("[data-id], [data-dono], [data-aniv], [data-parcela]")) {
-      abrirTarefa(null, { prazo_fatal: dia.dataset.dia, data_interna: dia.dataset.dia });
+    if (dia && !ev.target.closest("[data-dono], [data-aniv], [data-parcela]")) {
+      abrirTarefa(null, { prazo_fatal: dia.dataset.dia, advogada_id: advFiltro() });
     }
   });
+  $("#cal-ics").onclick = exportarIcs;
+}
+
+// ---------- exportar .ics (Google Agenda) ----------
+// Exporta as tarefas dos clientes ainda não feitas (as aprovadas no Monitoramento e as de "+ Nova tarefa") e os prazos
+// fatais internos dos cards, da advogada do filtro (ou de todas). Itens comuns de checklist ficam de fora.
+function exportarIcs() {
+  if (!cal.dados) return;
+  const adv = Number($("#cal-adv").value) || null;
+  const { itens, prazos } = entradasDe(cal.dados.cards, { adv: adv || "", proc: "" });
+  const eventos = [
+    ...itens.filter((c) => c.tipo && !c.feito).map((c) => ({
+      uid: `item-${c.pai.id}-${c.id}`, data: c.data, hora: c.hora, pai: c.pai,
+      titulo: (c.tipo === "prazo" ? "PRAZO: " : "") + c.texto, resp: pessoaPorChave(c.resp)?.nome_completo })),
+    ...prazos.map((p) => ({ uid: `prazo-card-${p.pai.id}`, data: p.data, hora: p.hora, pai: p.pai,
+      titulo: "PRAZO: " + p.descricao })),
+  ];
+  if (!eventos.length) { toast("Nada para exportar (só entram tarefas com data ainda não feitas)."); return; }
+  const blob = new Blob([gerarIcs(eventos)], { type: "text/calendar;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `prazos-${isoLocal(new Date())}.ics`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast(`${eventos.length} evento(s) exportado(s)${adv ? " (só da advogada do filtro)" : ""}. No Google Agenda: Configurações → Importar e exportar → Importar.`);
+}
+
+function icsTexto(s) {
+  return String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+}
+
+function icsDobrar(linha) {
+  // RFC 5545: linhas de até 75 octetos; continuação começa com espaço
+  const enc = new TextEncoder();
+  const partes = [];
+  let atual = "";
+  for (const ch of linha) {
+    if (enc.encode(atual + ch).length > (partes.length ? 74 : 75)) { partes.push(atual); atual = ""; }
+    atual += ch;
+  }
+  partes.push(atual);
+  return partes.join("\r\n ");
+}
+
+function gerarIcs(eventos) {
+  const agora = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
+  const dia = (iso) => iso.replace(/-/g, "");
+  const seguinte = (iso) => isoLocal(new Date(new Date(iso + "T12:00:00").getTime() + 864e5)).replace(/-/g, "");
+  const linhas = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//processos-local//agenda//PT-BR", "CALSCALE:GREGORIAN",
+    "X-WR-CALNAME:Prazos e tarefas"];
+  eventos.forEach((e) => {
+    const desc = [`Cliente: ${e.pai.nome}`, e.pai.numero_fmt && `Processo ${e.pai.numero_fmt}`, e.pai.partes,
+      e.resp && `Responsável: ${e.resp}`,
+      "Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal."]
+      .filter(Boolean).join("\n");
+    const ev = ["BEGIN:VEVENT", `UID:${e.uid}@processos-local`, `DTSTAMP:${agora}`];
+    if (e.hora) {
+      const [h, m] = e.hora.split(":").map(Number);
+      ev.push(`DTSTART:${dia(e.data)}T${e.hora.replace(":", "")}00`,
+        `DTEND:${dia(e.data)}T${String(Math.min(h + 1, 23)).padStart(2, "0")}${String(m).padStart(2, "0")}00`);
+    } else {
+      ev.push(`DTSTART;VALUE=DATE:${dia(e.data)}`, `DTEND;VALUE=DATE:${seguinte(e.data)}`);
+    }
+    ev.push(`SUMMARY:${icsTexto(e.titulo + " — " + e.pai.nome)}`, `DESCRIPTION:${icsTexto(desc)}`, "TRANSP:TRANSPARENT", "END:VEVENT");
+    linhas.push(...ev);
+  });
+  linhas.push("END:VCALENDAR");
+  return linhas.map(icsDobrar).join("\r\n") + "\r\n";
 }
 
 ligarCalendario();

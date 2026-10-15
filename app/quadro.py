@@ -1,6 +1,8 @@
 """Quadro de clientes (aba Clientes; o nome fica em static/quadro.js): 5 colunas que ela nomeia, cards de cliente
-(tabela clientes) criados à mão, com a checklist padrão, ligados a um processo ou marcados como petição inicial
-(o processo ainda não existe) ou preventivo/consultoria. Na tela e na API o nome do cliente se chama "titulo"."""
+(tabela clientes) ligados a um processo ou marcados como petição inicial (o processo ainda não existe) ou
+preventivo/consultoria. Criado à mão, o card nasce com a checklist padrão; cada processo também ganha um card sozinho
+(interligar.py), e as tarefas aprovadas no Monitoramento entram no checklist dele. Na tela e na API o nome do cliente
+se chama "titulo"."""
 import calendar
 import re
 from datetime import date
@@ -12,20 +14,26 @@ MODELO = {"processo": "processo", "inicial": "processo", "preventivo": "preventi
 
 
 def prazos_processuais(con, hoje: date | None = None) -> dict[str, dict]:
-    """Prazo fatal processual de cada processo = o próximo prazo dele na agenda (vindo do DJEN / "Verificar prazos"
-    ou calculado). Sem prazo futuro, o último vencido ainda em aberto. Sugestões já vencidas não contam."""
+    """Prazo fatal processual de cada processo = o próximo prazo dele: item ainda não feito, no checklist do cliente,
+    que veio de um prazo aprovado no Monitoramento (com a data do item, que ela pode ter mudado), ou sugestão ainda
+    aguardando aprovação. Sem prazo futuro, o último vencido ainda em aberto. Sugestões já vencidas não contam."""
     hoje = (hoje or date.today()).isoformat()
     melhor: dict[str, dict] = {}
-    for r in con.execute("""SELECT id, numero, titulo, prazo_fatal, hora, status FROM tarefas
-                            WHERE numero IS NOT NULL AND prazo_fatal IS NOT NULL AND tipo='prazo'
-                              AND status NOT IN ('concluido', 'descartado')
-                              AND (status != 'sugerido' OR prazo_fatal >= %s)
-                            ORDER BY prazo_fatal""", (hoje,)):
+    for r in con.execute("""SELECT t.numero, t.titulo AS descricao, t.prazo_fatal AS data, t.hora, t.id AS tarefa_id,
+                                   true AS sugerido
+                              FROM tarefas t
+                             WHERE t.status='sugerido' AND t.tipo='prazo' AND t.numero IS NOT NULL AND t.prazo_fatal >= %s
+                            UNION ALL
+                            SELECT c.numero, i.texto, i.data, i.hora, t.id, false
+                              FROM checklist_itens i JOIN tarefas t ON t.id = i.origem_id
+                              JOIN clientes c ON c.id = i.cliente_id
+                             WHERE t.tipo='prazo' AND NOT i.feito AND i.data IS NOT NULL AND c.numero IS NOT NULL
+                            ORDER BY data, sugerido""", (hoje,)):
         atual = melhor.get(r["numero"])
         # em ordem de data: troca enquanto o escolhido estiver vencido (fica o 1º futuro, ou o vencido mais recente)
         if atual is None or atual["data"] < hoje:
-            melhor[r["numero"]] = {"tipo": "processual", "descricao": r["titulo"], "data": r["prazo_fatal"],
-                                   "hora": r["hora"], "tarefa_id": r["id"], "sugerido": r["status"] == "sugerido"}
+            melhor[r["numero"]] = {"tipo": "processual", "descricao": r["descricao"], "data": r["data"],
+                                   "hora": r["hora"], "tarefa_id": r["tarefa_id"], "sugerido": r["sugerido"]}
     return melhor
 
 
@@ -36,6 +44,8 @@ def carregar(con, hoje: date | None = None) -> dict:
     inadimplentes = financeiro.clientes_inadimplentes(con)  # selo no card: mesmo nome de um lançamento inadimplente
     colunas = [dict(r) for r in con.execute("SELECT id, posicao, nome FROM clientes_colunas ORDER BY posicao")]
     itens = checklist.ler(con, "card")
+    sugestoes = {r[0]: r[1] for r in con.execute(  # aguardando aprovação no Monitoramento, por processo
+        "SELECT numero, COUNT(*) FROM tarefas WHERE status='sugerido' AND numero IS NOT NULL GROUP BY numero")}
     cards = []
     for r in con.execute("""SELECT q.*, p.partes AS p_partes, p.numero AS p_numero, p.tribunal AS p_tribunal,
                                    p.orgao AS p_orgao,
@@ -51,6 +61,11 @@ def carregar(con, hoje: date | None = None) -> dict:
         d["cadastrado"] = d.pop("p_numero") is not None  # o painel do processo só abre se ele está na lista
         d["advogadas_processo"] = [int(x) for x in (d.pop("p_advs") or "").split(",") if x]
         d["inadimplente"] = financeiro.chave_cliente(d["titulo"]) in inadimplentes
+        d["sugestoes"] = sugestoes.get(d["numero"], 0) if d["numero"] else 0
+        cal = cals.de(d.pop("p_tribunal") or "", d.pop("p_orgao") or "")
+        for c in d["checklist"]:  # tarefa aprovada (prazo, audiência…) com data: cor da urgência na Agenda e no alerta
+            if c.get("tipo") and c["data"] and not c["feito"]:
+                c["urgencia"], c["dias_restantes"] = prazos.urgencia(c["data"], cal, hoje)
         if d["tipo"] == "processo":
             prazo = dict(processuais[d["numero"]]) if d["numero"] in processuais else None
         elif d["prazo_data"]:
@@ -59,10 +74,7 @@ def carregar(con, hoje: date | None = None) -> dict:
         else:
             prazo = None
         if prazo:
-            cal = cals.de(d.pop("p_tribunal") or "", d.pop("p_orgao") or "")
             prazo["urgencia"], prazo["dias_restantes"] = prazos.urgencia(prazo["data"], cal, hoje)
-        d.pop("p_tribunal", None)
-        d.pop("p_orgao", None)
         d["prazo"] = prazo
         cards.append(d)
     return {"colunas": colunas, "cards": cards, "tipos": TIPOS}
@@ -124,10 +136,12 @@ def criar(con, dados: dict) -> int:
 
 
 def atualizar(con, cid: int, dados: dict) -> bool:
-    atual = con.execute("SELECT tipo FROM clientes WHERE id=%s", (cid,)).fetchone()
+    atual = db.travar(con, "clientes", cid, dados)
     if not atual:
         return False
     v = _valores(dados, atual["tipo"])
+    if "titulo" in dados:  # salvo pelo diálogo do card: ela já conferiu o que foi criado sozinho
+        v["completar"] = False
     if "checklist" in dados:
         checklist.gravar(con, "card", cid, dados["checklist"])
     if v or "checklist" in dados:

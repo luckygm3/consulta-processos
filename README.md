@@ -168,6 +168,17 @@ Editor antes (ou junto) do deploy.
 - **Tirar o acesso**: `update public.advogadas set email = null where oab_numero = '…';` ou apague a usuária em
   Authentication → Users. Os processos dela continuam no banco.
 
+### As duas usando ao mesmo tempo
+
+- Ao voltar para a aba (ou para a janela) do app, a tela aberta recarrega sozinha e mostra o que a outra fez. Não
+  recarrega com um card, tarefa ou lançamento aberto, nem com algo sendo digitado.
+- Se as duas abrirem o **mesmo** card, tarefa ou lançamento e uma salvar primeiro, quem salvar depois vê o aviso
+  “foi alterado por outra pessoa (ou em outra aba) enquanto você editava”, em vez de apagar sem saber o que a outra
+  fez. **OK** salva mesmo assim (o que a outra mudou se perde); **Cancelar** não salva e deixa o que foi digitado no
+  diálogo (feche e abra de novo para ver a versão atual). Vale também para um item da checklist marcado na Agenda e
+  para um pagamento lançado na tabela do Financeiro enquanto o diálogo estava aberto.
+- Mexer em itens diferentes ao mesmo tempo não dá aviso nenhum.
+
 ## Chave do DataJud
 
 O DataJud (CNJ) fornece classe, assuntos, órgão julgador e as movimentações. A chave é pública, gratuita e igual
@@ -186,8 +197,8 @@ O DJEN (publicações) não precisa de chave.
 ## Uso
 
 O **menu lateral** tem as cinco telas: **Andamentos Processuais**, **Monitoramento**, **Clientes**,
-**Agenda** e **Financeiro**, além de **Configurações** no pé. O selo vermelho no Monitoramento conta prazos que
-vencem hoje/amanhã ou já venceram; no Financeiro, parcelas em atraso. **Recolher** deixa só os ícones (o app lembra);
+**Agenda** e **Financeiro**, além de **Configurações** no pé. O selo vermelho no Monitoramento conta as sugestões
+aguardando aprovação; no Financeiro, parcelas em atraso. **Recolher** deixa só os ícones (o app lembra);
 em tela estreita (celular) o menu vira uma gaveta aberta pelo **☰**.
 
 ### Andamentos Processuais
@@ -209,60 +220,56 @@ em tela estreita (celular) o menu vira uma gaveta aberta pelo **☰**.
   mostrar” liga/desliga na hora. Nada é apagado. No painel do processo, a caixa **Processo em cooperação** marca ou
   desmarca à mão (vale por cima da detecção automática).
 
-## Monitoramento (prazos)
+## Dados interligados: processo → cliente → checklist → Agenda
+
+- **Todo processo tem um cliente.** Processo captado pela OAB da Beatriz ou da Kazuza (DJEN, em “Atualizar tudo”) ou
+  incluído em “Adicionar processos” já ganha um card em **Clientes**, no topo da 1ª coluna, com o nome das partes como
+  nome provisório e o selo **completar dados**. É um card por processo, mesmo que o cliente se repita (quem tem um
+  processo trabalhista e outro de família tem dois cards). Processo em cooperação não ganha card. Card excluído não
+  volta sozinho (só se uma tarefa daquele processo for aprovada no Monitoramento, para o prazo não se perder).
+- **Tarefa do sistema passa pelo Monitoramento.** Prazos e audiências lidos das publicações e a verificação semanal
+  dos processos sigilosos chegam como **sugestões**. **Aprovar** põe a tarefa no checklist do cliente (com a data, o
+  horário e a responsável), e daí ela aparece na Agenda. **Rejeitar** tira do Monitoramento (e a publicação não sugere
+  de novo). O que você cria (“+ Nova tarefa”, “+ Tarefa / prazo” no painel do processo, ou um item digitado no card)
+  vai direto para o cliente, sem aprovação.
+- **Na primeira abertura depois desta versão** (uma vez só): cada processo já cadastrado ganha o seu card, e as
+  tarefas do Kanban antigo do Monitoramento vão para os clientes. As sugeridas continuam no Monitoramento, aguardando
+  aprovação. As já confirmadas (A fazer, Em andamento, Aguardando) entram aprovadas no checklist do cliente do processo.
+  Uma tarefa criada à mão sem processo, ou com checklist própria, vira um card de cliente com aquela checklist. As
+  concluídas ficam guardadas no banco, fora de vista.
+
+## Monitoramento (sugestões para aprovar)
 
 > **Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal.**
 
-Prazos que o sistema cria para lembrar de monitorar, avaliar a pertinência e incluir no checklist do cliente
-(era a aba “Agenda”; o calendário dela passou para a tela **Agenda**, que junta tudo).
+Lista de passagem: só o que o sistema sugeriu e ainda espera a sua decisão, agrupado por data (vencidos primeiro).
 
-- Duas visões: **Kanban** (Sugeridos → A fazer → Em andamento → Aguardando terceiros; arraste os cartões) e
-  **Lista por data**. Filtros por advogada e por processo.
-- **Concluídos**: o ícone ao lado das visões. Conclua pelo círculo do cartão (aparece ao passar o mouse), pela lista,
-  pelo botão **✓ Concluir** da tarefa, ou arrastando o cartão até o ícone. Lá dentro: **Restaurar** (volta para a
-  coluna de onde saiu) ou **Excluir definitivamente**.
-- **Contrair todos / Expandir todos** (Kanban): card contraído mostra só o título e o progresso da checklist. Clicar
-  num card contrai/expande só ele; para abrir a tarefa, use **Editar** (aparece ao passar o mouse) ou dois cliques.
-  O app lembra o estado.
-- **Exportar .ics**, **Feriados** e **Tipos de ato** ficam escondidos: aparecem ao passar o mouse na barra da agenda
-  (ou ao tocar no **⋯**).
+- Cada linha mostra a urgência, o prazo (fatal e interno), o processo, as partes, a responsável e **para o checklist
+  de qual cliente ela vai** ao ser aprovada. **✓ Aprovar**, **Editar** (ajustar título, data, horário, responsável,
+  recalcular o prazo ou escolher outro cliente antes de aprovar) e **Rejeitar**. Em lote: marque as caixinhas (ou
+  “todas”) e use **Aprovar selecionadas** / **Rejeitar selecionadas**. Filtros por advogada e por processo.
+- Sugestão sem processo precisa de um cliente escolhido (em Editar) para ser aprovada.
+- **Feriados** e **Tipos de ato** ficam escondidos: aparecem ao passar o mouse na barra (ou ao tocar no **⋯**).
 - Cores por urgência: vermelho = vencido; laranja = vence hoje/próximo dia útil; amarelo = até 5 dias úteis; verde = folgado.
-- **+ Nova tarefa**: qualquer tarefa, com ou sem processo, com checklist, prioridade e observações. No painel de um
-  processo há o atalho **+ Tarefa / prazo**. O quadro “Calcular prazo” calcula o fatal a partir da disponibilização.
-- **Checklist (estilo Trello)**, nas tarefas e nos cards do quadro de clientes. Cada item tem texto, feito/não feito
-  e, opcionais, **data**, **horário** (só com data) e **responsável** — clique no ícone do item (ou nas etiquetas dele)
-  para abrir esses campos. Arraste pela alça para reordenar; edite, exclua e adicione itens. Progresso discreto (“3/17”).
-  - **Responsáveis**: as advogadas e as pessoas da **Equipe** (⚙ Configurações → Equipe; vale na hora).
-  - **Na agenda**: todo item com data aparece na **Agenda** e na **Lista por data**, no dia/horário dele, como
-    “Elaboração do Mérito · Fulano” (nome da demanda), mais leve que os prazos. A caixinha marca como feito — é o mesmo
-    item do card/tarefa (nada é copiado), então vale nos dois lugares. Clicar no texto abre a demanda. Itens sem data
-    ficam só dentro dela; itens feitos saem da lista (no calendário ficam riscados). O Kanban não mostra itens.
-  - **Filtro Beatriz/Kazuza**: considera também o responsável do item (item dela aparece no filtro dela; a demanda
-    também aparece se tiver algum item com ela).
-- **Checklists padrão** (`checklists_padrao.txt`, um arquivo só): seção `[processo]` (as 17 etapas do contencioso) e
-  `[preventivo]` (consultoria). No quadro, o tipo do card escolhe a lista (petição inicial usa a de processo); numa
-  tarefa nova da agenda, “Modelo da checklist” escolhe (padrão: processo). Edite o arquivo para trocar as listas;
-  vale para as próximas demandas. Sugestões do DJEN e verificações semanais não recebem checklist.
 - **Prazo fatal: processual × interno.** Pontinho **cheio** = processual (veio do processo: publicação do DJEN,
-  “Verificar prazos” ou “Calcular prazo”); pontinho **vazado** = interno (data posta à mão). Se algum item tiver data
-  depois do prazo fatal da demanda, aparece um aviso discreto (não bloqueia).
-- **Processos sigilosos**: toda segunda-feira, cada processo que o DataJud não detalha ganha a tarefa
-  “Verificar processo sigiloso nº …” em A fazer (sem duplicar: concluída ou excluída, só volta na segunda seguinte; se a
-  da semana anterior ainda estiver aberta, não cria outra). Critério: o DataJud respondeu por completo e não trouxe o
-  processo (“sem dados públicos”), ou trouxe com nível de sigilo maior que zero. Não entram no alerta de prazos.
+  “Verificar prazos” ou “Calcular prazo”); pontinho **vazado** = interno (data posta à mão).
+- **Processos sigilosos**: toda segunda-feira, cada processo que o DataJud não detalha ganha a sugestão
+  “Verificar processo sigiloso nº …” (sem duplicar: rejeitada, ou aprovada e marcada como feita, só volta na segunda
+  seguinte; se a da semana anterior ainda estiver aberta, não cria outra). Aprovada de novo, reaproveita o item da
+  semana anterior no checklist do cliente, em vez de empilhar um por semana. Critério: o DataJud respondeu por completo
+  e não trouxe o processo (“sem dados públicos”), ou trouxe com nível de sigilo maior que zero. Não entram no alerta
+  de prazos.
 - **Verificar prazos** (sem IA): lê as publicações do DJEN ainda não analisadas, procura expressões como “prazo de
   quinze (15) dias”, “em 48 horas”, “5 dias úteis”, “manifeste-se”, “contestar”, “intime-se para”, reconhece o ato
-  (contestação, apelação, embargos de declaração…) e cria cartões em **Sugeridos** com o trecho original, o link da
-  publicação e a memória de cálculo. **Confirmar** (um ou em lote) leva para “A fazer”; **Descartar** guarda a decisão
-  (a publicação não sugere de novo). Detecções incertas vêm marcadas “conferir manualmente”. Por padrão, publicações
-  cujo prazo já venceu não viram cartão (há uma opção para incluí-las). Audiências com data no texto também viram cartão.
+  (contestação, apelação, embargos de declaração…) e cria sugestões com o trecho original, o link da publicação e a
+  memória de cálculo. Detecções incertas vêm marcadas “conferir manualmente”. Por padrão, publicações cujo prazo já
+  venceu não viram sugestão (há uma opção para incluí-las). Audiências com data no texto também viram sugestão.
 - **Tipos de ato**: tabela editável (palavras-chave → nome do ato e prazo padrão). O prazo padrão só é usado quando o
   texto não traz o número de dias; sem nenhuma indicação, vale o CPC art. 218 §3º (5 dias).
 - **Feriados**: tabela editável por tribunal ou comarca (feriado municipal: preencha a comarca como aparece no nome da
   vara). Vem pré-preenchida para o ano passado e os próximos dois anos — **confira com o calendário oficial do tribunal**.
-- **Exportar .ics**: gera um arquivo para importar no Google Agenda (Configurações → Importar e exportar). Exporta todas
-  ou só as filtradas; sugestões não confirmadas ficam de fora.
-- Ao abrir o app, uma faixa avisa quantos prazos vencem hoje/amanhã e quantos estão vencidos.
+- Ao abrir o app, uma faixa avisa quantos prazos (aprovados ou ainda sugeridos) vencem hoje/amanhã, quantos estão
+  vencidos e quantas sugestões esperam aprovação.
 
 ## Clientes
 
@@ -274,13 +281,32 @@ Para renomear a aba, troque a constante `NOME_QUADRO` no começo de `static/quad
 
 - Kanban de clientes com o mesmo visual da agenda: **5 colunas** que nascem sem nome. Clique em “Nomear coluna” para
   dar o nome (ex.: Trabalhista, Pro bono); clique de novo para renomear. Enter salva, Esc desiste.
+- **Cards criados sozinhos** (um por processo, veja “Dados interligados”) nascem sem checklist e com o selo
+  **completar dados**: abra, confira o nome do cliente, preencha o que faltar e salve (o selo sai). **+ Inserir
+  checklist padrão** traz a lista do tipo do card.
 - **+ Adicionar cliente** no pé de cada coluna. O card nasce com a checklist padrão do tipo e tem um **tipo**: *Com processo*
   (escolha entre os processos cadastrados, pelo número ou pelo nome da parte, ou digite um número CNJ), *Petição
   inicial* ou *Preventivo / consultoria* (sem processo). Quando virar processo, abra o card, mude o tipo e vincule.
-- **Prazo fatal do card**: com processo, é o **processual** — vem sozinho da agenda (o próximo prazo em aberto daquele
-  processo; sem prazo futuro, o vencido mais recente ainda aberto). Sem processo (petição inicial, preventivo), é um
-  **interno** que você digita no card (o quê, data e, se quiser, horário); ele aparece na agenda com destaque leve e
-  entra no aviso de prazos ao abrir o app.
+- **Checklist (estilo Trello)**. Cada item tem texto, feito/não feito e, opcionais, **data**, **horário** (só com data)
+  e **responsável**: clique no ícone do item (ou nas etiquetas dele) para abrir esses campos. Arraste pela alça para
+  reordenar; edite, exclua e adicione itens. Progresso discreto (“3/17”).
+  - As tarefas aprovadas no Monitoramento (e as de “+ Nova tarefa”) são itens como os outros, com uma etiqueta do
+    tipo (prazo, audiência, tarefa). Dá para mudar a data ou o texto no card; o prazo do card acompanha.
+  - **Responsáveis**: as advogadas e as pessoas da **Equipe** (⚙ Configurações → Equipe; vale na hora).
+  - **Na Agenda**: todo item com data aparece no dia/horário dele, como “Elaboração do Mérito · Fulano”. A caixinha
+    marca como feito: é o mesmo item do card (nada é copiado), então vale nos dois lugares. Itens sem data ficam só
+    dentro do card.
+  - Se uma etapa comum tiver data depois do prazo fatal do card, aparece um aviso discreto (não bloqueia).
+- **Checklists padrão** (`checklists_padrao.txt`, um arquivo só): seção `[processo]` (as 17 etapas do contencioso) e
+  `[preventivo]` (consultoria). O tipo do card escolhe a lista (petição inicial usa a de processo). Edite o arquivo
+  para trocar as listas; vale para os próximos cards.
+- **Prazo fatal do card**: com processo, é o **processual**: o próximo prazo em aberto daquele processo (item de prazo
+  ainda não feito no checklist, ou sugestão ainda no Monitoramento, marcada “aguardando aprovação”); sem prazo futuro,
+  o vencido mais recente ainda aberto. Sem processo (petição inicial, preventivo), é um **interno** que você digita no
+  card (o quê, data e, se quiser, horário); ele aparece na agenda com destaque leve e entra no aviso de prazos ao abrir
+  o app.
+- O card mostra quantas sugestões daquele processo ainda esperam no Monitoramento (clique para ir até elas). No painel
+  do processo, o botão com o nome do cliente abre o card.
 - Arraste os cards entre colunas ou dentro da mesma coluna (uma linha azul mostra onde vão cair).
 - Expandido, o card mostra o processo (clique para abrir), as partes e o próximo item da checklist; contraído, só o
   nome e o progresso. Mesmo botão **Contrair todos / Expandir todos** da agenda.
@@ -289,17 +315,24 @@ Para renomear a aba, troque a constante `NOME_QUADRO` no começo de `static/quad
 
 Um calendário só, por mês ou por semana, com feriados. Junta, sem copiar nada (marcar feito vale na origem):
 
-- **Monitoramento**: prazo fatal (cor da urgência) e data interna (contorno tracejado) das tarefas, e os itens com data
-  das checklists delas;
-- **Checklists dos clientes**: itens com data dos cards de Clientes e o prazo fatal interno do card;
+- **Prazos e tarefas**: as tarefas dos clientes (aprovadas no Monitoramento ou criadas em “+ Nova tarefa”), na cor da
+  urgência. Sugestões ainda não aprovadas não aparecem;
+- **Checklists dos clientes**: os outros itens com data dos cards e o prazo fatal interno do card;
 - **Aniversários**: “Parabenizar <cliente>”, todo ano;
 - **Financeiro**: cada parcela (e a entrada) aparece **1 dia depois do vencimento**, para conferir se foi paga; a
   parcial aparece com o **valor que falta**. A caixinha lança o que falta com a data de hoje (para outro valor ou
   data, use o **+** no Financeiro); em atraso fica em vermelho.
 
-Os botões acima do calendário ligam e desligam cada origem (o app lembra); o filtro de advogada vale para o
-Monitoramento e as checklists. Dia com muita coisa mostra 4 itens e “+N mais”. Clicar num item abre a tarefa, o card
-ou o lançamento de onde ele veio; dois cliques num dia criam uma tarefa de monitoramento com essa data.
+Os botões acima do calendário ligam e desligam cada origem (o app lembra); o filtro de advogada vale para as tarefas e
+as checklists. Dia com muita coisa mostra 4 itens e “+N mais”. Clicar num item abre o card ou o lançamento de onde ele
+veio.
+
+- **+ Nova tarefa** (ou dois cliques num dia, que já trazem a data): escolha o cliente (ou o processo, que escolhe o
+  cliente dele), título, tipo, data, horário e responsável. Vai direto para o checklist do cliente. O quadro
+  “Calcular prazo” calcula o fatal a partir da disponibilização. No painel de um processo, **+ Tarefa / prazo** faz o
+  mesmo, já com o processo.
+- **Exportar .ics**: arquivo para importar no Google Agenda (Configurações → Importar e exportar), com as tarefas dos
+  clientes ainda não feitas e os prazos internos dos cards (só da advogada do filtro, se houver).
 
 ## Financeiro
 
@@ -403,6 +436,7 @@ app/        código (FastAPI): djen.py, datajud.py, cnj.py, sync.py (atualizaç�
             banco_antigo.py (lê o SQLite antigo com o -wal e avisa se ele tem dados fora do Supabase);
             agenda: prazos.py (calendário e cálculo), extrair.py (regex), agenda.py, rotas_agenda.py;
             quadro de clientes: quadro.py (inclui aniversários), rotas_quadro.py; checklist.py (itens, "feito" e equipe);
+            interligar.py (cliente de cada processo; sugestão aprovada vira item do checklist; migração do Kanban antigo);
             financeiro: financeiro.py, rotas_financeiro.py
 static/     interface (HTML/CSS/JS puro; auth.js = login; app.js = Andamentos e menu lateral; agenda.js = Monitoramento;
             quadro.js = Clientes; calendario.js = Agenda; financeiro.js = Financeiro;
@@ -410,8 +444,8 @@ static/     interface (HTML/CSS/JS puro; auth.js = login; app.js = Andamentos e 
 supabase/   schema.sql: tabelas, RLS e gatilhos (colar no SQL Editor)
 scripts/    migrar_para_supabase.py: copia o banco antigo (SQLite) para o Supabase
 api/        index.py: entrada da Vercel (o vercel.json manda tudo para ela)
-tests/      testes do cálculo de prazos, da detecção no texto, da agenda, do quadro, do financeiro, do acesso (RLS),
-            da migração e da sincronização
+tests/      testes do cálculo de prazos, da detecção no texto, da agenda, do quadro, dos dados interligados, do
+            financeiro, do acesso (RLS), da migração e da sincronização
 db/         banco antigo (SQLite), de antes do Supabase: só a origem da migração e backup; não vai para o git
             (renomeie para db-antigo num computador cujos dados não importam, para não ver o aviso vermelho)
 logs/       app.log (erros de rede e dos tribunais), só quando roda no computador

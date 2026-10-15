@@ -157,6 +157,20 @@ def agora() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+class Conflito(Exception):
+    """Outra pessoa (ou outra aba) salvou o registro depois que a tela o leu: salvar apagaria o que ela fez (409)."""
+
+
+def travar(con, tabela: str, rid: int, dados: dict):
+    """Linha que vai ser salva, travada até o fim da transação (dois salvamentos ao mesmo tempo esperam um pelo
+    outro); None se não existe. Com "versao" nos dados (o atualizado_em que a tela leu ao abrir o diálogo), confere
+    se ninguém salvou depois. Sem "versao" (arrastar, concluir, "salvar mesmo assim"), não confere."""
+    r = con.execute(f"SELECT * FROM {tabela} WHERE id=%s FOR UPDATE", (rid,)).fetchone()
+    if r and "versao" in dados and (dados["versao"] or None) != r["atualizado_em"]:
+        raise Conflito("Alterado por outra pessoa (ou em outra aba) enquanto você editava")
+    return r
+
+
 def normalizar(texto: str) -> str:
     """Minúsculas e sem acento, para busca tolerante ('citacao' acha 'Citação')."""
     t = unicodedata.normalize("NFKD", texto or "")

@@ -1,23 +1,16 @@
 "use strict";
-// Agenda / Kanban de prazos. Usa utilidades de app.js ($, api, esc, toast, fmtData, estado, abrirPainel...).
+// Monitoramento: as sugestões do sistema (prazos e audiências lidos das publicações, verificação semanal dos processos
+// sigilosos) aguardando aprovação. Aprovada, a sugestão vira um item do checklist do cliente (e daí aparece na Agenda);
+// rejeitada, sai daqui. Também ficam aqui o diálogo de tarefa (usado ainda pela Agenda e pelo painel do processo para
+// criar uma tarefa direto no cliente), os feriados, os tipos de ato e o alerta de prazos.
+// Usa utilidades de app.js ($, api, esc, toast, fmtData, estado, abrirPainel...).
 
-const COLUNAS = [
-  ["sugerido", "Sugeridos", "aguardando confirmação"],
-  ["a_fazer", "A fazer", ""],
-  ["andamento", "Em andamento", ""],
-  ["aguardando", "Aguardando terceiros", ""],
-];
-// Concluídas saem do quadro e ficam só na vista "Concluídos" (ícone ao lado das visões)
-const NOME_STATUS = { ...Object.fromEntries(COLUNAS.map(([k, n]) => [k, n])), concluido: "Concluído" };
 const SEMANA = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
 const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro",
   "novembro", "dezembro"];
 
 const ag = {
-  // o calendário saiu do Monitoramento (virou a tela Agenda, em calendario.js): preferência antiga cai no Kanban
-  tarefas: [], cardsQuadro: [], visao: lerPreferencia("ag-visao") === "lista" ? "lista" : "kanban",
-  editando: null, ck: null, calculo: undefined, arrastando: null, feriadosCache: {}, vendoFeitas: false,
-  memoria: memoriaCards("cards-agenda"), modelos: {},
+  tarefas: [], cardsQuadro: [], editando: null, calculo: undefined, feriadosCache: {}, clienteEscolhido: false,
 };
 const TIPO_PRAZO = { processual: "Prazo processual (veio do processo)", interno: "Prazo interno (posto pela equipe)" };
 
@@ -76,7 +69,8 @@ function casaProcesso(f, x) {
   if (!f.proc) return true;
   const digitos = f.proc.replace(/\D/g, "");
   return (digitos.length >= 4 && (x.numero || "").includes(digitos))
-    || (x.partes || "").toLowerCase().includes(f.proc.toLowerCase()) || (x.numero_fmt || "").includes(f.proc);
+    || (x.partes || "").toLowerCase().includes(f.proc.toLowerCase()) || (x.numero_fmt || "").includes(f.proc)
+    || (x.nome || "").toLowerCase().includes(f.proc.toLowerCase());
 }
 
 // filtro Beatriz/Kazuza: a demanda é dela se ela for a responsável (ou, sem responsável, atuar no processo),
@@ -87,33 +81,24 @@ function tarefasFiltradas() {
   const f = filtrosAgenda();
   const id = Number(f.adv) || null;
   return ag.tarefas.filter((t) => casaProcesso(f, t) && (!id || t.advogada_id === id
-    || (!t.advogada_id && t.advogadas_processo.includes(id)) || temItemDe(t.checklist, id)));
+    || (!t.advogada_id && t.advogadas_processo.includes(id))));
 }
 
-// Itens de checklist com data e prazo fatal interno dos cards do quadro: entram na Agenda e na Lista por data.
-// Fonte única: são lidos das próprias demandas (tarefas e cards); nada é copiado para a agenda.
-function entradasAgenda() {
-  return entradasDe(ag.tarefas, ag.cardsQuadro, filtrosAgenda());
-}
-
+// Itens de checklist com data e prazo fatal interno dos cards de Clientes: o que vai para a Agenda. Fonte única: são
+// lidos dos próprios cards (as tarefas aprovadas no Monitoramento são itens deles); nada é copiado para a agenda.
 // f = { adv: id da advogada ou "", proc: texto do filtro de processo }
-function entradasDe(tarefas, cards, f) {
+function entradasDe(cards, f) {
   const id = Number(f.adv) || null;
-  const pais = [
-    ...tarefas.filter((t) => t.status !== "concluido").map((t) => ({
-      dono: "tarefa", id: t.id, nome: t.titulo, numero: t.numero, numero_fmt: t.numero_fmt, partes: t.partes,
-      advs: t.advogada_id ? [t.advogada_id] : t.advogadas_processo, checklist: t.checklist, prazo: null })),
-    ...cards.map((c) => ({
-      dono: "card", id: c.id, nome: c.titulo, numero: c.numero, numero_fmt: c.numero_fmt, partes: c.partes,
-      advs: c.advogadas_processo, checklist: c.checklist, prazo: c.prazo })),
-  ];
+  const pais = cards.map((c) => ({
+    dono: "card", id: c.id, nome: c.titulo, numero: c.numero, numero_fmt: c.numero_fmt, partes: c.partes,
+    advs: c.advogadas_processo, checklist: c.checklist, prazo: c.prazo }));
   const itens = [], prazos = [];
   for (const p of pais.filter((x) => casaProcesso(f, x))) {
     for (const c of p.checklist) {
       // item com responsável: vale o responsável; sem responsável: vale quem é da demanda
       if (c.data && (!id || c.resp === `a:${id}` || (!c.resp && p.advs.includes(id)))) itens.push({ ...c, pai: p });
     }
-    // prazo processual de card já aparece como a própria tarefa do processo; aqui só o interno
+    // prazo processual do card já aparece como o próprio item do prazo; aqui só o interno
     if (p.prazo && p.prazo.tipo === "interno" && (!id || p.advs.includes(id) || temItemDe(p.checklist, id))) {
       prazos.push({ ...p.prazo, pai: p });
     }
@@ -130,10 +115,9 @@ async function marcarItem(dono, donoId, item, feito) {
   recarregarTela();
 }
 
-// clicar num item ou prazo de card abre a demanda de onde ele veio
-function abrirPai(dono, id, tarefas = ag.tarefas) {
+// clicar num item ou prazo de card abre o card (cliente) de onde ele veio
+function abrirPai(dono, id) {
   if (dono === "card") abrirCardPorId(id);
-  else abrirTarefa(tarefas.find((t) => t.id === id));
 }
 
 // Depois de salvar algo: recarrega a tela aberta (Monitoramento, Agenda, Clientes…) e os selos do menu
@@ -143,162 +127,109 @@ function recarregarTela() {
   carregarAlertas();
 }
 
-function preencherFiltrosAgenda() {
-  const sel = $("#ag-f-adv"), atual = sel.value;
-  sel.innerHTML = `<option value="">Todas as advogadas</option>` +
-    estado.advogadas.map((a) => `<option value="${a.id}" ${String(a.id) === atual ? "selected" : ""}>${esc(a.nome)}</option>`).join("");
+function preencherProcessos() {
   const procs = new Map();
   ag.tarefas.forEach((t) => t.numero && procs.set(t.numero_fmt, t.partes));
   estado.processos.forEach((p) => procs.set(p.numero_fmt, partesTexto(p)));
   $("#ag-processos").innerHTML = [...procs].map(([n, p]) => `<option value="${esc(n)}">${esc(p || "")}</option>`).join("");
 }
 
+function preencherFiltrosAgenda() {
+  const sel = $("#ag-f-adv"), atual = sel.value;
+  sel.innerHTML = `<option value="">Todas as advogadas</option>` +
+    estado.advogadas.map((a) => `<option value="${a.id}" ${String(a.id) === atual ? "selected" : ""}>${esc(a.nome)}</option>`).join("");
+  preencherProcessos();
+}
+
+// Para onde a sugestão vai ao ser aprovada: o cliente escolhido, o card do processo, ou um card novo para o processo
+const cardDoProcesso = (numero, cards = ag.cardsQuadro) =>
+  numero ? cards.filter((c) => c.numero === numero).sort((a, b) => a.id - b.id)[0] || null : null;
+
+function destinoDe(t) {
+  const escolhido = t.cliente_id && ag.cardsQuadro.find((c) => c.id === t.cliente_id);
+  const card = escolhido || cardDoProcesso(t.numero);
+  if (card) return { nome: card.titulo, novo: false };
+  return t.numero ? { nome: "novo cliente (criado ao aprovar)", novo: true } : { nome: "escolha o cliente (Editar)", falta: true };
+}
+
+// ---------- lista de sugestões ----------
 function renderAgenda() {
-  const filtradas = tarefasFiltradas();
-  const lista = filtradas.filter((t) => t.status !== "concluido");
-  const feitas = ag.vendoFeitas;
-  document.querySelectorAll("#ag-visao [data-visao]").forEach((b) => b.classList.toggle("ativa", !feitas && b.dataset.visao === ag.visao));
-  $("#ag-concluidos").classList.toggle("ativa", feitas);
-  $("#ag-concluidos").setAttribute("aria-pressed", feitas);
-  $("#ag-kanban").hidden = feitas || ag.visao !== "kanban";
-  $("#ag-lista").hidden = feitas || ag.visao !== "lista";
-  $("#ag-feitas").hidden = !feitas;
-  $("#ag-expandir").hidden = feitas || ag.visao !== "kanban";
-  if (feitas) renderFeitas(filtradas.filter((t) => t.status === "concluido"));
-  else if (ag.visao === "kanban") renderKanban(lista);
-  else renderLista(lista, entradasAgenda());
-  $("#ag-limpar").hidden = !Object.values(filtrosAgenda()).some(Boolean);
+  const lista = tarefasFiltradas();
+  const hoje = isoLocal(new Date());
+  const grupos = new Map();
+  const chave = (data) => (!data ? "sem" : data < hoje ? "vencidos" : data);
+  [...lista].sort((a, b) => (a.prazo_fatal || "9999").localeCompare(b.prazo_fatal || "9999")).forEach((t) => {
+    const k = chave(t.prazo_fatal);
+    if (!grupos.has(k)) grupos.set(k, []);
+    grupos.get(k).push(linhaSugestao(t));
+  });
+  const titulo = (k) => k === "sem" ? "Sem data" : k === "vencidos" ? "⚠ Vencidos" :
+    `${dataBr(k)}${k === hoje ? " — hoje" : ""} <small>${k.slice(0, 4)}</small>`;
+  const ordem = [...grupos.keys()].sort((a, b) => (a === "vencidos" ? -1 : b === "vencidos" ? 1 : a === "sem" ? 1 : b === "sem" ? -1 : a.localeCompare(b)));
+  const filtrado = Object.values(filtrosAgenda()).some(Boolean);
+  $("#ag-lista").innerHTML = ordem.map((k) => `
+    <section class="lista-grupo"><h3>${titulo(k)}</h3>${grupos.get(k).join("")}</section>`).join("")
+    || `<p class="vazio">${filtrado ? "Nenhuma sugestão com esses filtros." : `Nenhuma sugestão aguardando aprovação.<br>
+        <small>Depois de “Atualizar tudo”, use “Verificar prazos” para ler as publicações novas.</small>`}</p>`;
+  $("#ag-lote").hidden = !lista.length;
+  $("#ag-sel-todos").checked = false;
+  $("#ag-limpar").hidden = !filtrado;
 }
 
-// ---------- cartão ----------
-function botaoConcluir() {
-  return `<button class="concluir" type="button" data-acao="concluir" title="Concluir" aria-label="Concluir">
-    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
-}
-
-// Card contraído mostra só título + progresso da checklist (clique no card alterna; "Editar" ou duplo clique abre)
-function cartaoHTML(t) {
-  const advs = advogadasDaTarefa(t);
-  const sug = t.status === "sugerido";
+function linhaSugestao(t) {
   const origem = { djen: "DJEN", sigilo: "sigiloso" }[t.origem];
+  const destino = destinoDe(t);
+  const interna = t.data_interna && t.data_interna !== t.prazo_fatal ? ` · interno ${dataBr(t.data_interna, false)}` : "";
   return `
-    <article class="cartao u-${t.urgencia} ${ag.memoria.contraido(t.id) ? "contraido" : ""}" draggable="true" data-id="${t.id}">
-      ${sug ? "" : botaoConcluir()}
-      <div class="c-topo">
-        ${sug ? `<input type="checkbox" class="c-sel" data-sel="${t.id}" aria-label="Selecionar">` : ""}
-        <span class="c-urg">${rotuloUrgencia(t)}</span>
-        ${t.prioridade === "alta" ? `<span class="c-tag prio">alta</span>` : ""}
-        ${t.tipo === "audiencia" ? `<span class="c-tag">audiência</span>` : ""}
-        ${origem ? `<span class="c-tag ${t.origem === "djen" ? "djen" : ""}">${origem}</span>` : ""}
+    <div class="sug u-${t.urgencia}" data-id="${t.id}">
+      <input type="checkbox" class="c-sel" data-sel="${t.id}" aria-label="Selecionar “${esc(t.titulo)}”">
+      <span class="c-urg">${rotuloUrgencia(t)}</span>
+      <div class="sug-txt">
+        <div class="li-titulo">${t.tipo === "prazo" ? marcaPrazo(t.prazo_tipo) : ""}${esc(t.titulo)}
+          ${t.tipo === "audiencia" ? `<span class="c-tag">audiência</span>` : ""}
+          ${origem ? `<span class="c-tag ${t.origem === "djen" ? "djen" : ""}">${origem}</span>` : ""}</div>
+        <div class="sug-sub">${t.prazo_fatal ? `${t.tipo === "audiencia" ? "Data" : "Fatal"} <b>${dataBr(t.prazo_fatal)}</b>${t.hora ? " " + esc(t.hora) : ""}${interna}` : "Sem data"}
+          ${t.numero ? ` · <button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>` : ""}
+          ${t.partes ? ` · <span class="c-partes">${esc(t.partes)}</span>` : ""}</div>
+        <div class="sug-destino ${destino.falta ? "falta" : ""}" title="Ao aprovar, vai para o checklist deste cliente">→ checklist de ${esc(destino.nome)}</div>
+        ${t.conferir ? `<div class="c-aviso">⚠ conferir manualmente</div>` : ""}
       </div>
-      <div class="c-cab"><span class="c-titulo">${esc(t.titulo)}</span>${progressoChecklist(t.checklist)}</div>
-      ${t.numero ? `<button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>
-        ${t.partes ? `<div class="c-partes">${esc(t.partes)}</div>` : ""}` : ""}
-      ${t.prazo_fatal ? `<div class="c-datas">${t.tipo === "audiencia" ? "" : marcaPrazo(t.prazo_tipo)}${t.tipo === "audiencia" ? "Data" : "Fatal"}: <b>${dataBr(t.prazo_fatal)}</b>${t.hora ? ` ${esc(t.hora)}` : ""}
-        ${t.data_interna && t.data_interna !== t.prazo_fatal ? ` · interno ${dataBr(t.data_interna, false)}` : ""}</div>` : ""}
-      <div class="c-rodape">
-        ${advs.map(etiquetaAdv).join("")}${!t.advogada_id && advs.length > 1 ? `<span class="c-def">definir</span>` : ""}
-        ${t.observacoes ? `<span class="c-check" title="${esc(t.observacoes)}">✎</span>` : ""}
-        ${sug ? "" : `<button class="c-editar" type="button" data-acao="editar">Editar</button>`}
-      </div>
-      ${t.conferir ? `<div class="c-aviso">⚠ conferir manualmente</div>` : ""}
-      ${sug ? `<div class="c-acoes">
-        <button class="btn mini primario" type="button" data-acao="confirmar">Confirmar</button>
+      <span class="li-adv">${advogadasDaTarefa(t).map(etiquetaAdv).join("")}</span>
+      <span class="sug-acoes">
+        <button class="btn mini primario" type="button" data-acao="aprovar">✓ Aprovar</button>
         <button class="btn mini" type="button" data-acao="editar">Editar</button>
-        <button class="btn mini perigo" type="button" data-acao="descartar">Descartar</button></div>` : ""}
-    </article>`;
+        <button class="btn mini perigo" type="button" data-acao="rejeitar">Rejeitar</button>
+      </span>
+    </div>`;
 }
 
-// ---------- kanban ----------
-function renderKanban(lista) {
-  $("#ag-kanban").innerHTML = COLUNAS.map(([st, nome, sub]) => {
-    const cards = lista.filter((t) => t.status === st);
-    const lote = st === "sugerido" && cards.length ? `
-      <div class="col-lote">
-        <label class="chk"><input type="checkbox" data-sel-todos> todos</label>
-        <button class="link pequeno" type="button" data-lote="confirmar">Confirmar selecionados</button>
-        <button class="link pequeno perigo-txt" type="button" data-lote="descartar">Descartar</button>
-      </div>` : "";
-    return `
-      <section class="coluna" data-status="${st}">
-        <header class="col-cab"><h3>${nome} <span class="qtd">${cards.length}</span></h3>${sub ? `<small>${sub}</small>` : ""}</header>
-        ${lote}
-        <div class="col-cartoes">${cards.map(cartaoHTML).join("") || `<p class="nada col-vazia">Arraste cartões para cá</p>`}</div>
-      </section>`;
-  }).join("");
-}
-
-async function moverTarefa(id, status) {
-  const t = ag.tarefas.find((x) => x.id === id);
-  if (!t || t.status === status) return;
-  t.status = status;
-  renderAgenda();
+async function aprovar(ids, clienteId = null) {
+  if (!ids.length) { toast("Selecione pelo menos uma sugestão."); return; }
   try {
-    await api(`/api/agenda/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
-    if (status === "concluido") toast("Concluída: foi para Concluídos.");
+    const r = await api("/api/agenda/aprovar", { method: "POST", body: JSON.stringify({ ids, cliente_id: clienteId }) });
+    const partes = [];
+    if (r.aprovadas) partes.push(`${r.aprovadas} aprovada(s): foram para o checklist do cliente e aparecem na Agenda.`);
+    if (r.sem_cliente) partes.push(`${r.sem_cliente} sem processo ficaram aqui: abra em Editar e escolha o cliente.`);
+    toast(partes.join(" ") || "Nada aprovado (já tinham saído do Monitoramento?).");
   } catch (e) {
     toast("Erro: " + e.message);
   }
   recarregarTela();
 }
 
-// ---------- concluídos ----------
-function renderFeitas(lista) {
-  const ordenadas = [...lista].sort((a, b) => (b.concluido_em || "").localeCompare(a.concluido_em || ""));
-  $("#ag-feitas").innerHTML = `
-    <div class="feitas-cab"><h3>Concluídos <span class="qtd">${ordenadas.length}</span></h3>
-      <button class="link pequeno" type="button" data-voltar>voltar</button></div>
-    ${ordenadas.map((t) => `
-      <div class="feita" data-fid="${t.id}">
-        <div class="feita-txt">
-          <span class="li-titulo">${esc(t.titulo)}</span>
-          ${t.numero ? `<button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>` : ""}
-        </div>
-        <span class="li-adv">${advogadasDaTarefa(t).map(etiquetaAdv).join("")}</span>
-        <span class="feita-quando">${t.concluido_em ? "em " + dataBr(t.concluido_em, false) : ""}</span>
-        <span class="feita-acoes">
-          <button class="btn mini" type="button" data-restaurar>Restaurar</button>
-          <button class="btn mini perigo" type="button" data-apagar>Excluir definitivamente</button>
-        </span>
-      </div>`).join("") || `<p class="vazio">Nada concluído${Object.values(filtrosAgenda()).some(Boolean) ? " com esses filtros" : " ainda"}.</p>`}`;
-}
-
-function alternarFeitas(mostrar = !ag.vendoFeitas) {
-  ag.vendoFeitas = mostrar;
-  renderAgenda();
-}
-
-async function restaurarTarefa(id) {
+async function rejeitar(ids) {
+  if (!ids.length) { toast("Selecione pelo menos uma sugestão."); return; }
+  if (!confirm(`Rejeitar ${ids.length > 1 ? `${ids.length} sugestões` : "esta sugestão"}? Sai do Monitoramento e não vai para o cliente (a publicação não volta a sugerir).`)) return;
   try {
-    const t = await api(`/api/agenda/${id}/restaurar`, { method: "POST" });
-    toast(`Restaurada em “${NOME_STATUS[t.status] || t.status}”.`);
+    const r = await api("/api/agenda/rejeitar", { method: "POST", body: JSON.stringify({ ids }) });
+    toast(`${r.rejeitadas} rejeitada(s).`);
   } catch (e) {
     toast("Erro: " + e.message);
   }
   recarregarTela();
 }
 
-async function apagarDefinitivo(id) {
-  const t = ag.tarefas.find((x) => x.id === id);
-  if (!t || !confirm(`Excluir definitivamente “${t.titulo}”?\nNão dá para desfazer.`)) return;
-  try {
-    await api(`/api/agenda/${id}`, { method: "DELETE" });
-    toast("Excluída definitivamente.");
-  } catch (e) {
-    toast("Erro: " + e.message);
-  }
-  recarregarTela();
-}
-
-async function emLote(ids, acao) {
-  if (!ids.length) { toast("Selecione pelo menos um cartão."); return; }
-  if (acao === "descartar" && !confirm(`Descartar ${ids.length} sugestão(ões)? A publicação não volta a gerar sugestão.`)) return;
-  const r = await api("/api/agenda/lote", { method: "POST", body: JSON.stringify({ ids, acao }) });
-  toast(`${r.alterados} ${acao === "confirmar" ? "confirmado(s): foram para A fazer" : "descartado(s)"}.`);
-  recarregarTela();
-}
-
-// ---------- calendário ----------
+// ---------- calendário (helpers usados por calendario.js) ----------
 function inicioSemana(d) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   x.setDate(x.getDate() - x.getDay());
@@ -311,85 +242,45 @@ async function feriadosNoPeriodo(de, ate) {
   return ag.feriadosCache[chave];
 }
 
-// Item de checklist na agenda: leve (sem cor de fundo), com caixinha de feito; clicar no texto abre a demanda
-function itemAgendaHTML(c, classe) {
+// Item de checklist na agenda, com caixinha de feito; clicar no texto abre o cliente. Tarefa que veio do
+// Monitoramento (prazo, audiência…) leva a cor da urgência; item comum fica leve (sem cor de fundo).
+function itemAgendaHTML(c) {
   const quem = pessoaPorChave(c.resp);
-  return `<div class="${classe} ${c.feito ? "feito" : ""}" data-dono="${c.pai.dono}" data-dono-id="${c.pai.id}" data-item="${esc(c.id)}"
+  const tarefa = c.tipo ? `cal-tarefa u-${c.urgencia || "sem_data"}` : "";
+  const marca = c.tipo === "prazo" ? marcaPrazo(c.prazo_tipo) : "";
+  return `<div class="cal-item ${tarefa} ${c.feito ? "feito" : ""}" data-dono="${c.pai.dono}" data-dono-id="${c.pai.id}" data-item="${esc(c.id)}"
       role="button" tabindex="0" title="${esc(c.texto)} · ${esc(c.pai.nome)}${quem ? " — " + esc(quem.nome_completo) : ""}">
     <input type="checkbox" class="ck-ag" ${c.feito ? "checked" : ""} aria-label="Feito: ${esc(c.texto)}">
-    ${classe === "lista-ck" ? `<span class="it-hora">${esc(c.hora || "")}</span>` : ""}
-    <span class="it-txt">${classe !== "lista-ck" && c.hora ? `<b>${esc(c.hora)}</b> ` : ""}${esc(c.texto)}<span class="it-pai"> · ${esc(c.pai.nome)}</span></span>
-    ${classe === "lista-ck" ? `<span class="li-adv">${quem ? etiquetaPessoa(quem) : ""}</span>` : ""}
+    <span class="it-txt">${marca}${c.hora ? `<b>${esc(c.hora)}</b> ` : ""}${esc(c.texto)}<span class="it-pai"> · ${esc(c.pai.nome)}</span></span>
   </div>`;
 }
 
-// Prazo fatal interno de um card do quadro: destaque leve (contorno na cor da urgência, sem fundo)
-function prazoCardHTML(p, classe) {
-  const rotulo = `${marcaPrazo("interno")}${p.hora ? esc(p.hora) + " " : ""}${esc(p.descricao)}<span class="it-pai"> · ${esc(p.pai.nome)}</span>`;
-  if (classe === "cal") {
-    return `<button type="button" class="cal-chip cal-prazo-card u-${p.urgencia}" data-dono="card" data-dono-id="${p.pai.id}"
-      title="Prazo fatal de ${esc(p.pai.nome)}">${rotulo}</button>`;
-  }
-  return `<div class="lista-item lista-prazo-card u-${p.urgencia}" data-dono="card" data-dono-id="${p.pai.id}" role="button" tabindex="0">
-    <span></span><span class="c-urg">${rotuloUrgencia({ ...p, prazo_fatal: p.data })}</span>
-    <span class="li-titulo">${rotulo}</span><span></span><span></span>
-    <span class="li-status">${esc(typeof NOME_QUADRO === "string" ? NOME_QUADRO : "")}</span>
-  </div>`;
+// Prazo fatal interno de um card de Clientes: destaque leve (contorno na cor da urgência, sem fundo)
+function prazoCardHTML(p) {
+  return `<button type="button" class="cal-chip cal-prazo-card u-${p.urgencia}" data-dono="card" data-dono-id="${p.pai.id}"
+    title="Prazo fatal de ${esc(p.pai.nome)}">${marcaPrazo("interno")}${p.hora ? esc(p.hora) + " " : ""}${esc(p.descricao)}<span class="it-pai"> · ${esc(p.pai.nome)}</span></button>`;
 }
 
-// ---------- lista por data ----------
-function renderLista(lista, { itens, prazos }) {
-  const hoje = isoLocal(new Date());
-  const grupos = new Map();
-  const por = (k, html) => { if (!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(html); };
-  const chave = (data) => (!data ? "sem" : data < hoje ? "vencidos" : data);
-  [...lista].sort((a, b) => (a.prazo_fatal || "9999").localeCompare(b.prazo_fatal || "9999")).forEach((t) => por(chave(t.prazo_fatal), `
-    <div class="lista-item u-${t.urgencia}" data-id="${t.id}">
-      ${t.status === "sugerido" ? "<span></span>" : botaoConcluir()}
-      <span class="c-urg">${rotuloUrgencia(t)}</span>
-      <span class="li-titulo">${t.tipo === "audiencia" ? "" : marcaPrazo(t.prazo_tipo)}${esc(t.titulo)}${t.hora && !t.titulo.includes(t.hora) ? ` · ${esc(t.hora)}` : ""}</span>
-      ${t.numero ? `<button class="link c-proc" type="button" data-proc="${t.numero}">${esc(t.numero_fmt)}</button>` : "<span></span>"}
-      <span class="li-adv">${advogadasDaTarefa(t).map(etiquetaAdv).join("")}</span>
-      <span class="li-status">${NOME_STATUS[t.status] || t.status}${t.conferir ? " · ⚠ conferir" : ""}</span>
-    </div>`));
-  [...prazos].sort((a, b) => a.data.localeCompare(b.data)).forEach((p) => por(chave(p.data), prazoCardHTML(p, "lista")));
-  // itens feitos saem da lista (continuam riscados no calendário e dentro da demanda)
-  itens.filter((c) => !c.feito).sort((a, b) => (a.data + (a.hora || "99")).localeCompare(b.data + (b.hora || "99")))
-    .forEach((c) => por(chave(c.data), itemAgendaHTML(c, "lista-ck")));
-  const titulo = (k) => k === "sem" ? "Sem data" : k === "vencidos" ? "⚠ Vencidos" :
-    `${dataBr(k)}${k === hoje ? " — hoje" : ""} <small>${k.slice(0, 4)}</small>`;
-  const ordem = [...grupos.keys()].sort((a, b) => (a === "vencidos" ? -1 : b === "vencidos" ? 1 : a === "sem" ? 1 : b === "sem" ? -1 : a.localeCompare(b)));
-  $("#ag-lista").innerHTML = ordem.map((k) => `
-    <section class="lista-grupo"><h3>${titulo(k)}</h3>${grupos.get(k).join("")}</section>`).join("")
-    || `<p class="vazio">Nenhuma tarefa com esses filtros.</p>`;
-}
-
-// ---------- editar / criar ----------
+// ---------- diálogo: sugestão (ajustar, aprovar, rejeitar) ou tarefa nova (vai direto para o cliente) ----------
 async function abrirTarefa(t, padrao = {}) {
-  if (!t) {
-    // Tarefa nova nasce com a checklist padrão (checklists_padrao.txt, lido na hora); modelo "processo" por padrão
-    ag.modelos = await api("/api/checklist-padrao").catch(() => ({}));
-    ag.modelo = "processo";
-  }
   if (!estado.pessoas.length) await carregarPessoas();
+  if (!t || !ag.cardsQuadro.length) {  // tarefa nova pode ser aberta da Agenda ou do painel: lê os clientes na hora
+    try { ag.cardsQuadro = (await api("/api/quadro")).cards; } catch (_) { /* sem a lista, escolhe pelo processo */ }
+  }
+  preencherProcessos();
   ag.editando = t || null;
-  const x = t || { titulo: "", tipo: "tarefa", status: "a_fazer", prioridade: "media", ...padrao };
+  ag.clienteEscolhido = !!(t && t.cliente_id);
+  const x = t || { titulo: "", tipo: "tarefa", ...padrao };
   ag.calculo = undefined; // só envia se recalcular
-  $("#t-fatal").value = x.prazo_fatal || "";
-  ag.ck.definir(t ? t.checklist : ag.modelos[ag.modelo]);
-  $("#t-modelo").hidden = !!t;
-  marcarModelo();
-  $("#t-titulo-dlg").textContent = t ? (t.status === "sugerido" ? "Prazo sugerido" : "Editar") : "Nova tarefa";
+  $("#t-titulo-dlg").textContent = t ? "Sugestão do sistema" : "Nova tarefa";
   $("#t-titulo").value = x.titulo || "";
   $("#t-tipo").value = x.tipo || "tarefa";
-  $("#t-status").innerHTML = COLUNAS.map(([k, n]) => `<option value="${k}" ${k === x.status ? "selected" : ""}>${n}</option>`).join("");
   $("#t-numero").value = x.numero_fmt || x.numero || "";
   $("#t-adv").innerHTML = `<option value="">— as duas / a definir —</option>` +
     estado.advogadas.map((a) => `<option value="${a.id}" ${a.id === x.advogada_id ? "selected" : ""}>${esc(a.nome)}</option>`).join("");
-  $("#t-interna").value = x.data_interna || "";
+  $("#t-fatal").value = x.prazo_fatal || "";
   $("#t-hora").value = x.hora || "";
-  $("#t-prio").value = x.prioridade || "media";
-  $("#t-obs").value = x.observacoes || "";
+  opcoesCliente(x.cliente_id);
   const c = x.calculo || {};
   $("#t-disp").value = c.disponibilizacao || "";
   $("#t-dias").value = c.dias || "";
@@ -402,32 +293,39 @@ async function abrirTarefa(t, padrao = {}) {
   $("#t-link").hidden = !x.link;
   if (x.link) $("#t-link").href = x.link;
   $("#t-abrir-proc").hidden = !x.numero;
+  $("#t-obs").hidden = !x.observacoes;
+  $("#t-obs").textContent = x.observacoes || "";
+  $("#t-explica").textContent = t
+    ? "Aprovar põe esta tarefa no checklist do cliente (com a data, o horário e a responsável) e ela passa a aparecer na Agenda. Rejeitar tira do Monitoramento."
+    : "A tarefa entra direto no checklist do cliente (sem passar pelo Monitoramento) e aparece na Agenda na data escolhida.";
   $("#t-excluir").hidden = !t;
-  $("#t-excluir").textContent = t && t.origem === "djen" ? "Descartar" : "Excluir";
-  $("#t-confirmar").hidden = !(t && t.status === "sugerido");
-  $("#t-concluir").hidden = !t || t.status === "sugerido";
+  $("#t-salvar").hidden = !t;
+  $("#t-confirmar").textContent = t ? "✓ Aprovar" : "Adicionar ao cliente";
+  $("#t-erro").hidden = true;
   rotuloTipoPrazo();
   $("#dlg-tarefa").showModal();
+  if (!t) $("#t-titulo").focus();
+}
+
+// Clientes para escolher: o do processo vem marcado (sem card, a opção vazia cria um ao aprovar)
+function opcoesCliente(escolhido) {
+  const numero = $("#t-numero").value.replace(/\D/g, "");
+  const doProcesso = numero.length === 20 ? cardDoProcesso(numero) : null;
+  const atual = escolhido ?? (ag.clienteEscolhido ? Number($("#t-cliente").value) || null : doProcesso?.id ?? null);
+  const vazio = numero.length === 20 ? (doProcesso ? "— o cliente do processo —" : "— novo cliente para este processo —")
+    : "— escolha o cliente —";
+  const cards = [...ag.cardsQuadro].sort((a, b) => a.titulo.localeCompare(b.titulo, "pt-BR"));
+  $("#t-cliente").innerHTML = `<option value="">${vazio}</option>` + cards.map((c) =>
+    `<option value="${c.id}" ${c.id === atual ? "selected" : ""}>${esc(c.titulo)}${c.numero_fmt ? " — " + esc(c.numero_fmt) : ""}</option>`).join("");
 }
 
 // Processual (veio do DJEN / foi calculado a partir da disponibilização) ou interno (data posta à mão)
 function rotuloTipoPrazo() {
   const t = ag.editando;
   const tipo = (t && t.origem === "djen") || ag.calculo || (t && t.calculo) ? "processual" : "interno";
-  $("#t-prazo-tipo").innerHTML = $("#t-fatal").value && $("#t-tipo").value !== "audiencia" ? `${marcaPrazo(tipo)}${tipo}` : "";
-}
-
-// Modelo da checklist de uma tarefa nova (processo / preventivo). Troca sem perguntar se ela ainda não mexeu.
-function marcarModelo() {
-  document.querySelectorAll("#t-modelo [data-modelo]").forEach((b) => b.classList.toggle("ativa", b.dataset.modelo === ag.modelo));
-}
-
-function trocarModelo(modelo) {
-  if (modelo === ag.modelo) return;
-  if (!ag.ck.igualA(ag.modelos[ag.modelo] || []) && !confirm("Trocar a checklist pelo outro modelo? O que você mudou nela se perde.")) return;
-  ag.modelo = modelo;
-  ag.ck.definir(ag.modelos[modelo]);
-  marcarModelo();
+  const interna = (ag.calculo && ag.calculo.interno) || (t && t.data_interna);
+  $("#t-prazo-tipo").innerHTML = $("#t-fatal").value && $("#t-tipo").value === "prazo"
+    ? `${marcaPrazo(tipo)}${tipo}${interna && interna !== $("#t-fatal").value ? ` · interno ${dataBr(interna, false)}` : ""}` : "";
 }
 
 function renderMemoria(c) {
@@ -449,10 +347,9 @@ async function calcularNoDialogo() {
     const anterior = (ag.editando && ag.editando.calculo) || {};
     ag.calculo = { ...anterior, ...c };
     $("#t-fatal").value = c.vencimento;
-    $("#t-interna").value = c.interno;
+    if ($("#t-tipo").value === "tarefa") $("#t-tipo").value = "prazo";
     renderMemoria(ag.calculo);
     rotuloTipoPrazo();
-    ag.ck.atualizar();
   } catch (e) {
     toast("Erro: " + e.message);
   }
@@ -460,40 +357,61 @@ async function calcularNoDialogo() {
 
 function dadosDoDialogo() {
   const d = {
-    titulo: $("#t-titulo").value.trim(), tipo: $("#t-tipo").value, status: $("#t-status").value,
-    numero: $("#t-numero").value.replace(/\D/g, "") || null, advogada_id: Number($("#t-adv").value) || null,
-    prazo_fatal: $("#t-fatal").value || null, data_interna: $("#t-interna").value || null, hora: $("#t-hora").value || null,
-    prioridade: $("#t-prio").value, observacoes: $("#t-obs").value.trim() || null, checklist: ag.ck.valor(),
+    titulo: $("#t-titulo").value.trim(), tipo: $("#t-tipo").value,
+    numero: $("#t-numero").value.replace(/\D/g, "") || null, cliente_id: Number($("#t-cliente").value) || null,
+    advogada_id: Number($("#t-adv").value) || null, prazo_fatal: $("#t-fatal").value || null, hora: $("#t-hora").value || null,
   };
-  if (ag.calculo) d.calculo = ag.calculo;
+  if (ag.calculo) {
+    d.calculo = ag.calculo;
+    d.data_interna = ag.calculo.interno || null;
+  }
   return d;
 }
 
-// status: null = salvar como está; "a_fazer" = confirmar sugestão; "concluido" = salvar e mandar para Concluídos
-async function salvarTarefa(status = null) {
+function erroNoDialogo(msg) {
+  $("#t-erro").textContent = msg;
+  $("#t-erro").hidden = false;
+}
+
+// aprovar: false = só salvar a sugestão (continua no Monitoramento); true = salvar e aprovar (vai para o cliente)
+async function salvarTarefa(aprovarTambem) {
   const d = dadosDoDialogo();
   if (!d.titulo) { $("#t-titulo").focus(); return; }
-  if (d.numero && d.numero.length !== 20) { toast("Número de processo incompleto (precisa de 20 dígitos)."); return; }
-  if (status) d.status = status;
+  if (d.numero && d.numero.length !== 20) { erroNoDialogo("Número de processo incompleto (precisa de 20 dígitos)."); return; }
+  if (!d.numero && !d.cliente_id) { erroNoDialogo("Escolha o cliente (a tarefa não tem processo)."); $("#t-cliente").focus(); return; }
+  const t = ag.editando;
   try {
-    if (ag.editando) await api(`/api/agenda/${ag.editando.id}`, { method: "PATCH", body: JSON.stringify(d) });
-    else await api("/api/agenda", { method: "POST", body: JSON.stringify(d) });
+    if (!t) {
+      const r = await api("/api/agenda", { method: "POST", body: JSON.stringify(d) });
+      toast(`Tarefa adicionada ao checklist de ${r.cliente}.`);
+    } else {
+      await salvarConferindo(`/api/agenda/${t.id}`, "PATCH", d, t, "Esta sugestão foi alterada");
+      if (aprovarTambem) {
+        const r = await api("/api/agenda/aprovar", { method: "POST", body: JSON.stringify({ ids: [t.id], cliente_id: d.cliente_id }) });
+        if (!r.aprovadas) throw new Error("Não aprovada: ela já tinha saído do Monitoramento (aprovada ou rejeitada em outra aba?).");
+        toast("Aprovada: foi para o checklist do cliente e aparece na Agenda.");
+      } else {
+        toast("Sugestão salva (continua aguardando aprovação).");
+      }
+    }
     $("#dlg-tarefa").close();
-    toast({ a_fazer: "Prazo confirmado: foi para A fazer.", concluido: "Concluída: foi para Concluídos." }[status] || "Salvo.");
     recarregarTela();
   } catch (e) {
-    toast("Erro: " + e.message);
+    erroNoDialogo(e.message);
   }
 }
 
-async function excluirTarefa() {
+async function rejeitarNoDialogo() {
   const t = ag.editando;
-  const djen = t.origem === "djen";
-  if (!confirm(djen ? "Descartar este cartão? A publicação não volta a gerar sugestão." : "Excluir esta tarefa?")) return;
-  await api(`/api/agenda/${t.id}`, { method: "DELETE" });
-  $("#dlg-tarefa").close();
-  toast(djen ? "Descartado." : "Excluída.");
-  recarregarTela();
+  if (!t || !confirm("Rejeitar esta sugestão? Sai do Monitoramento e não vai para o cliente (a publicação não volta a sugerir).")) return;
+  try {
+    await api("/api/agenda/rejeitar", { method: "POST", body: JSON.stringify({ ids: [t.id] }) });
+    $("#dlg-tarefa").close();
+    toast("Rejeitada.");
+    recarregarTela();
+  } catch (e) {
+    erroNoDialogo(e.message);
+  }
 }
 
 // ---------- verificar prazos ----------
@@ -508,7 +426,7 @@ async function rodarVerificacao() {
       <div><strong>${r.analisadas}</strong> publicação(ões) analisada(s).</div>
       <div><strong>${r.sugeridos}</strong> prazo(s) e <strong>${r.audiencias}</strong> audiência(s) sugerido(s)${r.conferir ? ` — ${r.conferir} marcado(s) para conferir manualmente` : ""}.</div>
       <div>${r.sem_prazo} sem prazo identificado; ${r.repetidos} repetida(s) (mesmo prazo já sugerido).</div>
-      ${r.ja_vencidos ? `<div>${r.ja_vencidos} com prazo já vencido não viraram cartão (marque a opção acima para incluí-los).</div>` : ""}
+      ${r.ja_vencidos ? `<div>${r.ja_vencidos} com prazo já vencido não viraram sugestão (marque a opção acima para incluí-los).</div>` : ""}
       ${r.erros ? `<div class="ruim">${r.erros} erro(s): veja logs/app.log.</div>` : ""}`
       : "Nenhuma publicação nova para analisar. Use “Atualizar tudo” para buscar publicações no DJEN.";
     recarregarTela();
@@ -521,69 +439,6 @@ async function rodarVerificacao() {
   }
 }
 
-// ---------- exportar .ics ----------
-function icsTexto(s) {
-  return String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
-}
-
-function icsDobrar(linha) {
-  // RFC 5545: linhas de até 75 octetos; continuação começa com espaço
-  const enc = new TextEncoder();
-  const partes = [];
-  let atual = "";
-  for (const ch of linha) {
-    if (enc.encode(atual + ch).length > (partes.length ? 74 : 75)) { partes.push(atual); atual = ""; }
-    atual += ch;
-  }
-  partes.push(atual);
-  return partes.join("\r\n ");
-}
-
-function exportarIcs() {
-  const filtradas = tarefasFiltradas();
-  const temFiltro = Object.values(filtrosAgenda()).some(Boolean);
-  let lista = ag.tarefas;
-  if (temFiltro && confirm(`Exportar só as ${filtradas.length} tarefa(s) filtradas?\n(Cancelar = exportar todas as ${ag.tarefas.length})`)) lista = filtradas;
-  lista = lista.filter((t) => t.prazo_fatal && t.status !== "sugerido"); // sugestões só entram depois de confirmadas
-  if (!lista.length) { toast("Nada para exportar (só entram cartões com data; sugeridos não confirmados ficam de fora)."); return; }
-  const blob = new Blob([gerarIcs(lista)], { type: "text/calendar;charset=utf-8" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `prazos-${isoLocal(new Date())}.ics`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  toast(`${lista.length} evento(s) exportado(s). No Google Agenda: Configurações → Importar e exportar → Importar.`);
-}
-
-function gerarIcs(lista) {
-  const agora = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
-  const dia = (iso) => iso.replace(/-/g, "");
-  const seguinte = (iso) => isoLocal(new Date(new Date(iso + "T12:00:00").getTime() + 864e5)).replace(/-/g, "");
-  const linhas = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//processos-local//agenda//PT-BR", "CALSCALE:GREGORIAN",
-    "X-WR-CALNAME:Prazos e tarefas"];
-  lista.forEach((t) => {
-    const advs = advogadasDaTarefa(t).map((a) => a.nome).join(", ");
-    const desc = [t.numero_fmt && `Processo ${t.numero_fmt}`, t.partes, advs && `Responsável: ${advs}`,
-      t.data_interna && `Data interna: ${dataBr(t.data_interna)}`, `Status: ${NOME_STATUS[t.status] || t.status}`,
-      t.observacoes, t.trecho && `Trecho: ${t.trecho}`, t.link,
-      "Prazos calculados automaticamente são sugestões. Confirme sempre no processo e no calendário do tribunal."]
-      .filter(Boolean).join("\n");
-    const ev = ["BEGIN:VEVENT", `UID:tarefa-${t.id}@processos-local`, `DTSTAMP:${agora}`];
-    if (t.hora) {
-      const ini = dia(t.prazo_fatal) + "T" + t.hora.replace(":", "") + "00";
-      const [h, m] = t.hora.split(":").map(Number);
-      ev.push(`DTSTART:${ini}`, `DTEND:${dia(t.prazo_fatal)}T${String(Math.min(h + 1, 23)).padStart(2, "0")}${String(m).padStart(2, "0")}00`);
-    } else {
-      ev.push(`DTSTART;VALUE=DATE:${dia(t.prazo_fatal)}`, `DTEND;VALUE=DATE:${seguinte(t.prazo_fatal)}`);
-    }
-    ev.push(`SUMMARY:${icsTexto((t.tipo === "prazo" ? "PRAZO: " : t.tipo === "audiencia" ? "" : "") + t.titulo + (t.numero_fmt ? " — " + t.numero_fmt : ""))}`,
-      `DESCRIPTION:${icsTexto(desc)}`, "TRANSP:TRANSPARENT", "END:VEVENT");
-    linhas.push(...ev);
-  });
-  linhas.push("END:VCALENDAR");
-  return linhas.map(icsDobrar).join("\r\n") + "\r\n";
-}
-
 // ---------- alertas ----------
 async function carregarAlertas() {
   let a;
@@ -592,14 +447,16 @@ async function carregarAlertas() {
   const partes = [];
   if (proximos) partes.push(`<strong>${proximos}</strong> ${proximos === 1 ? "prazo vence" : "prazos vencem"} hoje/amanhã`);
   if (a.vencidos) partes.push(`<strong>${a.vencidos}</strong> ${a.vencidos === 1 ? "vencido" : "vencidos"}`);
-  if (a.sugeridos) partes.push(`${a.sugeridos} ${a.sugeridos === 1 ? "sugestão aguardando" : "sugestões aguardando"} confirmação`);
+  if (a.sugeridos) partes.push(`${a.sugeridos} ${a.sugeridos === 1 ? "sugestão aguardando" : "sugestões aguardando"} aprovação no Monitoramento`);
   $("#alerta-prazos").hidden = !partes.length;
   $("#alerta-prazos").classList.toggle("grave", !!(proximos || a.vencidos));
   $("#alerta-prazos-texto").innerHTML = "⏰ " + partes.join(", ") + ".";
+  ag.alertas = a;
+  // selo do Monitoramento: quantas sugestões esperam aprovação
   const badge = $("#qtd-aba-agenda");
-  badge.hidden = !(proximos || a.vencidos);
-  badge.textContent = proximos + a.vencidos;
-  badge.title = `${proximos} vencem hoje/amanhã, ${a.vencidos} vencidos`;
+  badge.hidden = !a.sugeridos;
+  badge.textContent = a.sugeridos;
+  badge.title = `${a.sugeridos} sugestão(ões) aguardando aprovação`;
   // selo do Financeiro: parcelas vencidas e não pagas
   try {
     const f = await api("/api/financeiro/atrasadas");
@@ -653,7 +510,7 @@ async function salvarFeriado(tr) {
   try {
     await api(id ? `/api/feriados/${id}` : "/api/feriados", { method: id ? "PUT" : "POST", body: JSON.stringify(d) });
     ag.feriadosCache = {};
-    toast("Feriado salvo. Prazos já sugeridos não mudam sozinhos: recalcule no cartão se precisar.");
+    toast("Feriado salvo. Prazos já sugeridos não mudam sozinhos: recalcule na sugestão se precisar.");
     renderFeriados();
   } catch (e) {
     toast("Erro: " + e.message);
@@ -698,16 +555,16 @@ const TELAS = { processos: null, agenda: () => carregarAgenda() };
 // Título e descrição no topo (Andamentos mostra as OABs; o nome do quadro vem de quadro.js)
 const CABECALHOS = {
   processos: ["Andamentos Processuais", null],
-  agenda: ["Monitoramento", "Prazos que o sistema cria para lembrar de monitorar, avaliar a pertinência e incluir no checklist do cliente."],
-  quadro: ["Clientes", "Um cartão por cliente, com a checklist das demandas e a data de aniversário."],
-  calendario: ["Agenda", "Tudo num calendário só: monitoramento, checklists dos clientes, aniversários e parcelas."],
+  agenda: ["Monitoramento", "Sugestões do sistema (prazos, audiências, verificações) aguardando aprovação. Aprovada, a tarefa vai para o checklist do cliente e aparece na Agenda."],
+  quadro: ["Clientes", "Um cartão por cliente (cada processo ganha o seu), com o checklist das demandas e a data de aniversário."],
+  calendario: ["Agenda", "Tudo num calendário só: tarefas e checklists dos clientes, aniversários e parcelas."],
   financeiro: ["Financeiro", "Honorários: entradas, parcelas, o que já entrou e o que falta receber."],
 };
 
 function atualizarCabecalho() {
   const [titulo, descricao] = CABECALHOS[estado.tela] || CABECALHOS.processos;
   $("#titulo-tela").textContent = titulo;
-  $("#identidade").textContent = descricao ?? (estado.identidade || " ");
+  $("#identidade").textContent = descricao ?? (estado.identidade || " ");
   document.title = `${titulo} · Meus processos`;
   // botões do topo que só fazem sentido para processos/publicações
   $("#btn-adicionar").hidden = estado.tela !== "processos";
@@ -729,26 +586,7 @@ function mostrarTela(tela) {
   if (TELAS[tela]) TELAS[tela]().catch((e) => toast("Erro: " + e.message));
 }
 
-// Ícone de Concluídos: abre/fecha a vista e aceita cartões arrastados do Kanban
-function ligarConcluidos() {
-  const icone = $("#ag-concluidos");
-  icone.onclick = () => alternarFeitas();
-  icone.addEventListener("dragover", (ev) => {
-    if (ag.arrastando == null) return;
-    ev.preventDefault();
-    icone.classList.add("alvo");
-  });
-  icone.addEventListener("dragleave", () => icone.classList.remove("alvo"));
-  icone.addEventListener("drop", (ev) => {
-    ev.preventDefault();
-    icone.classList.remove("alvo");
-    const id = ag.arrastando ?? Number(ev.dataTransfer.getData("text/plain"));
-    ag.arrastando = null;
-    if (id) moverTarefa(id, "concluido");
-  });
-}
-
-// Botões pouco usados (.ics, feriados, tipos de ato): aparecem ao passar o mouse na barra (CSS) ou,
+// Botões pouco usados (feriados, tipos de ato): aparecem ao passar o mouse na barra (CSS) ou,
 // em tela de toque / pelo teclado, ao tocar na barra ou no "⋯". Tocar fora esconde de novo.
 function ligarExtras() {
   const barra = $("#ag-topo"), mais = $("#ag-mais");
@@ -760,7 +598,7 @@ function ligarExtras() {
   let toque = false;
   barra.addEventListener("pointerdown", (ev) => { toque = ev.pointerType !== "mouse"; });
   barra.addEventListener("click", (ev) => {
-    if (toque && !ev.target.closest("button, input, select, a")) revelar(true);
+    if (toque && !ev.target.closest("button, input, select, a, label")) revelar(true);
   });
   document.addEventListener("pointerdown", (ev) => { if (!barra.contains(ev.target)) revelar(false); });
   $("#ag-extras").addEventListener("click", (ev) => { if (ev.target.closest("button")) revelar(false); });
@@ -769,19 +607,8 @@ function ligarExtras() {
 // ---------- eventos ----------
 function ligarAgenda() {
   document.querySelectorAll("[data-tela]").forEach((b) => { b.onclick = () => mostrarTela(b.dataset.tela); });
-  $("#alerta-prazos-ver").onclick = () => {
-    ag.visao = "lista";
-    mostrarTela("agenda");
-  };
-  $("#ag-visao").onclick = (ev) => {
-    const b = ev.target.closest("[data-visao]");
-    if (!b) return;
-    ag.visao = b.dataset.visao;
-    ag.vendoFeitas = false;
-    gravarPreferencia("ag-visao", ag.visao);
-    renderAgenda();
-  };
-  ligarConcluidos();
+  // "ver" do alerta: sugestões esperando vão para o Monitoramento; senão, a Agenda (onde estão os prazos aprovados)
+  $("#alerta-prazos-ver").onclick = () => mostrarTela(ag.alertas && ag.alertas.sugeridos ? "agenda" : "calendario");
   ligarExtras();
   $("#ag-f-adv").onchange = renderAgenda;
   $("#ag-f-proc").oninput = renderAgenda;
@@ -789,114 +616,49 @@ function ligarAgenda() {
     ["#ag-f-adv", "#ag-f-proc"].forEach((s) => { $(s).value = ""; });
     renderAgenda();
   };
-  $("#ag-nova").onclick = () => abrirTarefa(null, { advogada_id: Number($("#ag-f-adv").value) || null });
   $("#ag-verificar").onclick = () => { $("#v-resultado").hidden = true; $("#dlg-verificar").showModal(); };
   $("#v-rodar").onclick = rodarVerificacao;
-  $("#ag-ics").onclick = exportarIcs;
   $("#ag-feriados").onclick = abrirFeriados;
   $("#ag-tipos").onclick = abrirTipos;
 
-  // cartões (kanban e lista): abrir, abrir processo, ações de sugerido, seleção em lote
-  const telaAgenda = $("#tela-agenda");
-  telaAgenda.addEventListener("click", (ev) => {
+  // seleção e ações em lote
+  const selecionadas = () => [...document.querySelectorAll("#ag-lista .c-sel:checked")].map((c) => Number(c.dataset.sel));
+  $("#ag-sel-todos").onchange = (ev) => document.querySelectorAll("#ag-lista .c-sel").forEach((c) => { c.checked = ev.target.checked; });
+  $("#ag-lote").addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-lote]");
+    if (!b) return;
+    if (b.dataset.lote === "aprovar") aprovar(selecionadas());
+    else rejeitar(selecionadas());
+  });
+
+  // linhas: aprovar, editar, rejeitar, abrir processo; clique no resto da linha abre a sugestão
+  $("#ag-lista").addEventListener("click", (ev) => {
     const proc = ev.target.closest("[data-proc]");
     if (proc) { ev.stopPropagation(); abrirPainel(proc.dataset.proc); return; }
     if (ev.target.closest(".c-sel")) return;
-    const todos = ev.target.closest("[data-sel-todos]");
-    if (todos) { document.querySelectorAll(".c-sel").forEach((c) => { c.checked = todos.checked; }); return; }
-    const lote = ev.target.closest("[data-lote]");
-    if (lote) {
-      const ids = [...document.querySelectorAll(".c-sel:checked")].map((c) => Number(c.dataset.sel));
-      emLote(ids, lote.dataset.lote);
-      return;
-    }
-    if (ev.target.closest("[data-voltar]")) { alternarFeitas(false); return; }
-    const feita = ev.target.closest("[data-fid]");
-    if (feita) {
-      const id = Number(feita.dataset.fid);
-      if (ev.target.closest("[data-restaurar]")) restaurarTarefa(id);
-      else if (ev.target.closest("[data-apagar]")) apagarDefinitivo(id);
-      return;
-    }
-    // item de checklist ou prazo de card (calendário/lista): a caixinha marca feito; o resto abre a demanda
-    const entrada = ev.target.closest("[data-dono]");
-    if (entrada) {
-      const donoId = Number(entrada.dataset.donoId);
-      if (ev.target.classList.contains("ck-ag")) marcarItem(entrada.dataset.dono, donoId, entrada.dataset.item, ev.target.checked);
-      else abrirPai(entrada.dataset.dono, donoId);
-      return;
-    }
-    const alvo = ev.target.closest("[data-id]");
-    if (!alvo) return;
-    const t = ag.tarefas.find((x) => x.id === Number(alvo.dataset.id));
-    const acao = ev.target.closest("[data-acao]");
-    if (acao && acao.dataset.acao === "confirmar") emLote([t.id], "confirmar");
-    else if (acao && acao.dataset.acao === "descartar") emLote([t.id], "descartar");
-    else if (acao && acao.dataset.acao === "concluir") moverTarefa(t.id, "concluido");
-    else if (acao || !alvo.classList.contains("cartao")) abrirTarefa(t); // "Editar", item da lista, chip do calendário
-    else if (!ev.target.closest("a, button, input, label")) alternarCard(alvo, ag.memoria);
-  });
-  telaAgenda.addEventListener("keydown", (ev) => {
-    const entrada = ev.target.closest("[data-dono]");
-    if (entrada && ev.key === "Enter" && !ev.target.classList.contains("ck-ag")) abrirPai(entrada.dataset.dono, Number(entrada.dataset.donoId));
-  });
-  telaAgenda.addEventListener("dblclick", (ev) => {
-    const c = ev.target.closest(".cartao");
-    if (c && !ev.target.closest("a, button, input, label")) abrirTarefa(ag.tarefas.find((x) => x.id === Number(c.dataset.id)));
-  });
-  ligarExpandir($("#ag-expandir"), ag.memoria, "#ag-kanban .cartao");
-
-  // arrastar e soltar entre colunas
-  const kanban = $("#ag-kanban");
-  kanban.addEventListener("dragstart", (ev) => {
-    const c = ev.target.closest(".cartao");
-    if (!c) return;
-    ag.arrastando = Number(c.dataset.id);
-    ev.dataTransfer.effectAllowed = "move";
-    ev.dataTransfer.setData("text/plain", c.dataset.id);
-    c.classList.add("arrastando");
-  });
-  kanban.addEventListener("dragend", (ev) => {
-    ev.target.closest(".cartao")?.classList.remove("arrastando");
-    $("#ag-concluidos").classList.remove("alvo");
-    ag.arrastando = null;
-  });
-  kanban.addEventListener("dragover", (ev) => {
-    const col = ev.target.closest(".coluna");
-    if (!col || ag.arrastando == null) return;
-    ev.preventDefault();
-    document.querySelectorAll(".coluna.alvo").forEach((c) => c !== col && c.classList.remove("alvo"));
-    col.classList.add("alvo");
-  });
-  kanban.addEventListener("dragleave", (ev) => {
-    const col = ev.target.closest(".coluna");
-    if (col && !col.contains(ev.relatedTarget)) col.classList.remove("alvo");
-  });
-  kanban.addEventListener("drop", (ev) => {
-    const col = ev.target.closest(".coluna");
-    if (!col) return;
-    ev.preventDefault();
-    col.classList.remove("alvo");
-    const id = ag.arrastando ?? Number(ev.dataTransfer.getData("text/plain"));
-    ag.arrastando = null;
-    moverTarefa(id, col.dataset.status);
+    const linha = ev.target.closest("[data-id]");
+    if (!linha) return;
+    const t = ag.tarefas.find((x) => x.id === Number(linha.dataset.id));
+    if (!t) return;
+    const acao = ev.target.closest("[data-acao]")?.dataset.acao;
+    if (acao === "aprovar") aprovar([t.id]);
+    else if (acao === "rejeitar") rejeitar([t.id]);
+    else if (!ev.target.closest("a, input, label") && (acao || !ev.target.closest("button"))) abrirTarefa(t);
   });
 
   // diálogo da tarefa
-  $("#t-salvar").onclick = () => salvarTarefa();
-  $("#t-confirmar").onclick = () => salvarTarefa("a_fazer");
-  $("#t-concluir").onclick = () => salvarTarefa("concluido");
-  $("#t-excluir").onclick = excluirTarefa;
+  $("#t-salvar").onclick = () => salvarTarefa(false);
+  $("#t-confirmar").onclick = () => salvarTarefa(true);
+  $("#t-excluir").onclick = rejeitarNoDialogo;
   $("#t-calcular").onclick = calcularNoDialogo;
   $("#t-abrir-proc").onclick = () => {
     const n = $("#t-numero").value.replace(/\D/g, "");
     if (n.length === 20) { $("#dlg-tarefa").close(); abrirPainel(n); }
   };
-  // checklist avisa etapas marcadas depois do prazo fatal da tarefa
-  ag.ck = criarChecklist($("#t-checklist"), { prazo: () => $("#t-fatal").value || null });
-  $("#t-fatal").addEventListener("input", () => { ag.ck.atualizar(); rotuloTipoPrazo(); });
+  $("#t-fatal").addEventListener("input", rotuloTipoPrazo);
   $("#t-tipo").addEventListener("change", rotuloTipoPrazo);
-  $("#t-modelo").onclick = (ev) => { const b = ev.target.closest("[data-modelo]"); if (b) trocarModelo(b.dataset.modelo); };
+  $("#t-numero").addEventListener("input", () => opcoesCliente());
+  $("#t-cliente").addEventListener("change", () => { ag.clienteEscolhido = true; });
 
   // feriados
   $("#fer-ano").onchange = renderFeriados;
@@ -930,7 +692,6 @@ function ligarAgenda() {
     }
     if (ev.target.closest("[data-tipo-remover]")) tr.remove();
   };
-
 }
 
 ligarAgenda();

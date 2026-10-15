@@ -47,7 +47,15 @@ function renderQuadro() {
 function prazoLinhaHTML(p) {
   if (!p) return "";
   const urg = ["vencido", "hoje", "amanha"].includes(p.urgencia) ? `u-${p.urgencia}` : "";
-  return `<div class="c-prazo ${urg}">${marcaPrazo(p.tipo)}${esc(p.descricao)} · <b>${dataBr(p.data)}</b>${p.hora ? " " + esc(p.hora) : ""}${p.sugerido ? " <span class=\"it-pai\">(sugerido)</span>" : ""}</div>`;
+  return `<div class="c-prazo ${urg}">${marcaPrazo(p.tipo)}${esc(p.descricao)} · <b>${dataBr(p.data)}</b>${p.hora ? " " + esc(p.hora) : ""}${p.sugerido ? " <span class=\"it-pai\">(aguardando aprovação)</span>" : ""}</div>`;
+}
+
+// Sugestões deste processo ainda no Monitoramento (clicar leva até elas)
+function sugestoesLinhaHTML(c) {
+  if (!c.sugestoes) return "";
+  const n = c.sugestoes;
+  return `<button class="link c-sug" type="button" data-sugestoes="${esc(c.numero_fmt)}" title="Ver no Monitoramento">
+    ${n} ${n > 1 ? "sugestões aguardando" : "sugestão aguardando"} aprovação</button>`;
 }
 
 // Contraído: só nome + progresso. Expandido: processo (ou tipo), partes, prazo fatal e o próximo item da checklist.
@@ -59,10 +67,11 @@ function cardHTML(c) {
       : `<div class="c-proc">${esc(c.numero_fmt)}</div>`;
   return `
     <article class="cartao qd-card ${qd.memoria.contraido(c.id) ? "contraido" : ""}" draggable="true" data-id="${c.id}">
-      <div class="c-cab"><span class="c-titulo">${esc(c.titulo)}${c.inadimplente ? ` <span class="selo selo-inad" title="Marcado como inadimplente no Financeiro">inadimplente</span>` : ""}</span>${progressoChecklist(c.checklist)}</div>
+      <div class="c-cab"><span class="c-titulo">${esc(c.titulo)}${c.inadimplente ? ` <span class="selo selo-inad" title="Marcado como inadimplente no Financeiro">inadimplente</span>` : ""}${c.completar ? ` <span class="selo selo-completar" title="Criado sozinho a partir do processo: confira o nome do cliente e preencha os dados">completar dados</span>` : ""}</span>${progressoChecklist(c.checklist)}</div>
       ${vinculo}
       ${c.tipo === "processo" && c.partes ? `<div class="c-partes">${esc(c.partes)}</div>` : ""}
       ${prazoLinhaHTML(c.prazo)}
+      ${sugestoesLinhaHTML(c)}
       ${proximo ? `<div class="c-proximo"><span>Próximo:</span> ${esc(proximo.texto)}${proximo.data ? ` <span>· ${dataBr(proximo.data, false)}</span>` : ""}</div>` : ""}
       ${anivLinhaHTML(c.aniversario)}
       ${tarde ? `<div class="c-tarde">${tarde} ${tarde > 1 ? "etapas" : "etapa"} depois do prazo fatal</div>` : ""}
@@ -202,7 +211,8 @@ function prazoDoCard() {
   return qd.tipo === "processo" ? qd.prazoProc?.data || null : $("#qc-prazo-data").value || null;
 }
 
-// mostra no diálogo o prazo processual que o card terá (o próximo prazo deste processo na agenda)
+// mostra no diálogo o prazo processual que o card terá (o próximo prazo deste processo: item aprovado no checklist ou
+// sugestão ainda no Monitoramento)
 let esperaPrazo;
 function buscarPrazoProcessual() {
   clearTimeout(esperaPrazo);
@@ -213,9 +223,9 @@ function buscarPrazoProcessual() {
     if (qd.prazoProc && !qd.prazoProc.data) qd.prazoProc = null;
     const p = qd.prazoProc;
     $("#qc-prazo-proc").innerHTML = p
-      ? `${marcaPrazo("processual")}${esc(p.descricao)} · <b>${dataBr(p.data)}</b>${p.hora ? " " + esc(p.hora) : ""}${p.sugerido ? " (sugerido, ainda não confirmado)" : ""}
-         <span class="ajuda">vem da Agenda (prazo em aberto deste processo)</span>`
-      : `<span class="ajuda">${numero.length === 20 ? "Nenhum prazo deste processo na Agenda. Use “Verificar prazos” ou crie o prazo na Agenda." : "Escolha o processo para ver o prazo dele."}</span>`;
+      ? `${marcaPrazo("processual")}${esc(p.descricao)} · <b>${dataBr(p.data)}</b>${p.hora ? " " + esc(p.hora) : ""}${p.sugerido ? " (aguardando aprovação no Monitoramento)" : ""}
+         <span class="ajuda">o próximo prazo em aberto deste processo</span>`
+      : `<span class="ajuda">${numero.length === 20 ? "Nenhum prazo em aberto deste processo. Use “Verificar prazos” no Monitoramento, ou “+ Nova tarefa” na Agenda." : "Escolha o processo para ver o prazo dele."}</span>`;
     qd.ck.atualizar();
   }, 200);
 }
@@ -235,6 +245,8 @@ async function abrirCard(c, coluna) {
   $("#qc-prazo-hora").value = c?.prazo_hora || "";
   qd.ck.definir(c ? c.checklist : qd.modelos[MODELO_DO_TIPO[qd.tipo]]);
   escolherTipo(qd.tipo);
+  $("#qc-completar").hidden = !c?.completar;
+  $("#qc-padrao").hidden = !c; // card que já existe (ex.: criado sozinho, sem checklist): traz o modelo do tipo
   $("#qc-erro").hidden = true;
   $("#qc-excluir").hidden = !c;
   $("#dlg-card").showModal();
@@ -255,7 +267,7 @@ async function salvarCard() {
   };
   if (!d.titulo) { $("#qc-titulo").focus(); return; }
   try {
-    if (qd.editando) await api(`/api/quadro/cards/${qd.editando.id}`, { method: "PATCH", body: JSON.stringify(d) });
+    if (qd.editando) await salvarConferindo(`/api/quadro/cards/${qd.editando.id}`, "PATCH", d, qd.editando, "Este card foi alterado");
     else await api("/api/quadro/cards", { method: "POST", body: JSON.stringify({ ...d, coluna_id: qd.coluna }) });
     $("#dlg-card").close();
     recarregarTela(); // Clientes, ou a tela de onde o card foi aberto (Monitoramento, Agenda)
@@ -263,6 +275,16 @@ async function salvarCard() {
     $("#qc-erro").textContent = e.message;
     $("#qc-erro").hidden = false;
   }
+}
+
+// Acrescenta a checklist padrão do tipo (checklists_padrao.txt) no fim da que o card já tem
+async function inserirChecklistPadrao() {
+  const modelos = await api("/api/checklist-padrao").catch(() => ({}));
+  const lista = modelos[MODELO_DO_TIPO[qd.tipo]] || [];
+  if (!lista.length) { toast("Checklist padrão vazia (confira o arquivo checklists_padrao.txt)."); return; }
+  qd.ck.adicionar(lista);
+  $("#qc-padrao").hidden = true;
+  toast(`${lista.length} itens acrescentados. Salve o card para gravar.`);
 }
 
 async function excluirCard() {
@@ -304,9 +326,17 @@ function ligarQuadro() {
   ligarArrasteQuadro();
 
   const tela = $("#tela-quadro");
+  $("#qc-padrao").onclick = inserirChecklistPadrao;
   tela.addEventListener("click", (ev) => {
     const proc = ev.target.closest("[data-proc]");
     if (proc) { abrirPainel(proc.dataset.proc); return; }
+    const sug = ev.target.closest("[data-sugestoes]");
+    if (sug) { // leva às sugestões deste processo no Monitoramento
+      $("#ag-f-adv").value = "";
+      $("#ag-f-proc").value = sug.dataset.sugestoes;
+      mostrarTela("agenda");
+      return;
+    }
     const nome = ev.target.closest("[data-renomear]");
     if (nome) { renomearColuna(nome); return; }
     const novo = ev.target.closest("[data-novo]");

@@ -1,9 +1,10 @@
-"""Rotas da agenda/kanban, verificação de prazos, feriados e tipos de ato."""
+"""Rotas do Monitoramento (sugestões: aprovar leva ao checklist do cliente), da Agenda (calendário), da verificação de
+prazos, dos feriados e dos tipos de ato."""
 from datetime import date
 
 from fastapi import APIRouter, Body, HTTPException
 
-from . import agenda, checklist, cnj, config, db, financeiro, prazos, quadro
+from . import agenda, checklist, cnj, config, db, financeiro, interligar, prazos, quadro
 
 rotas = APIRouter(prefix="/api")
 
@@ -17,21 +18,23 @@ def _ou_400(fn, *args):
 
 @rotas.get("/agenda")
 def listar():
-    """Tarefas + cards do quadro (a agenda mostra os itens de checklist com data e o prazo fatal dos cards)."""
+    """Monitoramento: sugestões aguardando aprovação + cards do quadro (para onde cada uma vai ao ser aprovada)."""
     with db.conexao() as con:
+        interligar.migrar(con)
         agenda.gerar_semanais(con)
         return {"tarefas": agenda.listar(con), "cards": quadro.carregar(con)["cards"], "pessoas": checklist.pessoas(con),
-                "status": agenda.STATUS, "regras": agenda.regras()}
+                "regras": agenda.regras()}
 
 
 @rotas.get("/calendario")
 def calendario(de: str, ate: str):
-    """Tudo o que vai para a Agenda (calendário único): tarefas do monitoramento e cards do quadro (a tela tira
-    deles prazos, datas internas e itens de checklist com data), aniversários e lembretes das parcelas."""
+    """Tudo o que vai para a Agenda (calendário único): cards do quadro (a tela tira deles os itens de checklist com
+    data, inclusive as tarefas aprovadas no Monitoramento, e o prazo fatal interno), aniversários e lembretes das
+    parcelas. Sugestões ainda não aprovadas não entram."""
     with db.conexao() as con:
         _ou_400(lambda: (date.fromisoformat(de), date.fromisoformat(ate)))
-        agenda.gerar_semanais(con)
-        return {"tarefas": agenda.listar(con), "cards": quadro.carregar(con)["cards"], "pessoas": checklist.pessoas(con),
+        interligar.migrar(con)
+        return {"cards": quadro.carregar(con)["cards"], "pessoas": checklist.pessoas(con),
                 "aniversarios": quadro.aniversarios(con, de, ate),
                 "parcelas": financeiro.lembretes(financeiro.listar(con), de, ate)}
 
@@ -84,25 +87,34 @@ def remover_pessoa(pid: int):
 @rotas.get("/agenda/alertas")
 def alertas():
     with db.conexao() as con:
+        interligar.migrar(con)
         agenda.gerar_semanais(con)  # roda ao abrir o app, antes de contar os alertas
-        cont = agenda.alertas(con)
-        # prazo fatal interno dos cards do quadro (o processual já é uma tarefa da agenda e já foi contado)
+        cont = agenda.alertas(con)  # sugestões no Monitoramento
+        # tarefas aprovadas (itens dos clientes vindos do Monitoramento, menos a verificação semanal de sigilosos) e
+        # prazo fatal interno dos cards
+        urgentes = ("vencido", "hoje", "amanha")
         for c in quadro.carregar(con)["cards"]:
+            datas = [i["urgencia"] for i in c["checklist"] if i.get("urgencia") in urgentes and i.get("origem") != "sigilo"]
             p = c["prazo"]
-            if p and p["tipo"] == "interno" and p["urgencia"] in ("vencido", "hoje", "amanha"):
-                cont["vencidos" if p["urgencia"] == "vencido" else p["urgencia"]] += 1
+            if p and p["tipo"] == "interno" and p["urgencia"] in urgentes:
+                datas.append(p["urgencia"])
+            for u in datas:
+                cont["vencidos" if u == "vencido" else u] += 1
         return cont
 
 
 @rotas.post("/agenda")
 def criar(dados: dict = Body(...)):
+    """Tarefa criada por ela (Agenda, painel do processo): não passa pelo Monitoramento, vai direto para o checklist do
+    cliente escolhido (ou o do processo)."""
     if not (dados.get("titulo") or "").strip():
         raise HTTPException(400, "Informe o título")
-    if "checklist" not in dados:  # tarefa criada por ela nasce com a checklist padrão (a tela já manda preenchida)
-        dados["checklist"] = checklist.padrao("processo")
+    dados = {k: v for k, v in dados.items() if k != "checklist"}
     with db.conexao() as con:
-        tid = _ou_400(agenda.criar, con, {**dados, "origem": "manual"})
-        return agenda.obter(con, tid)
+        tid = _ou_400(agenda.criar, con, {**dados, "status": "sugerido", "origem": "manual"})
+        cid = _ou_400(interligar.adicionar_ao_cliente, con, tid, dados.get("cliente_id"))
+        nome = con.execute("SELECT nome FROM clientes WHERE id=%s", (cid,)).fetchone()[0]
+        return {"id": tid, "cliente_id": cid, "cliente": nome}
 
 
 @rotas.patch("/agenda/{tid}")
@@ -115,32 +127,21 @@ def atualizar(tid: int, dados: dict = Body(...)):
     return t
 
 
-@rotas.post("/agenda/{tid}/restaurar")
-def restaurar(tid: int):
-    with db.conexao() as con:
-        if not agenda.restaurar(con, tid):
-            raise HTTPException(404, "Tarefa não está em Concluídos")
-        return agenda.obter(con, tid)
-
-
-@rotas.delete("/agenda/{tid}")
-def excluir(tid: int):
-    with db.conexao() as con:
-        r = con.execute("SELECT origem FROM tarefas WHERE id=%s", (tid,)).fetchone()
-        if r and r["origem"] == "djen":
-            agenda.lote(con, [tid], "descartar")  # guarda como descartada: a publicação não sugere de novo
-        else:
-            con.execute("DELETE FROM tarefas WHERE id=%s", (tid,))
-    return {"ok": True}
-
-
-@rotas.post("/agenda/lote")
-def lote(dados: dict = Body(...)):
+@rotas.post("/agenda/aprovar")
+def aprovar(dados: dict = Body(...)):
+    """Aprova sugestões: cada uma vira item do checklist do cliente (o escolhido, ou o do processo; sem card, cria)."""
     ids = [int(i) for i in dados.get("ids") or []]
-    if not ids:
-        return {"alterados": 0}
+    cliente = int(dados["cliente_id"]) if str(dados.get("cliente_id") or "").isdigit() else None
     with db.conexao() as con:
-        return {"alterados": _ou_400(agenda.lote, con, ids, dados.get("acao"))}
+        return interligar.aprovar(con, ids, cliente)
+
+
+@rotas.post("/agenda/rejeitar")
+def rejeitar(dados: dict = Body(...)):
+    """Tira do Monitoramento (fica guardada como descartada: a publicação não sugere de novo)."""
+    ids = [int(i) for i in dados.get("ids") or []]
+    with db.conexao() as con:
+        return {"rejeitadas": interligar.rejeitar(con, ids)}
 
 
 @rotas.post("/agenda/verificar")

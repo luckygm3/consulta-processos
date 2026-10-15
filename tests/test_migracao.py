@@ -131,8 +131,8 @@ class MigracaoTest(unittest.TestCase):
         self.assertEqual((t["status"], t["status_anterior"], t["hora"], t["conferir"], t["calculo"]),
                          ("concluido", "andamento", "13:55", True, {"dias": 15}))
         self.assertEqual(t["checklist"], [
-            {"id": "a1", "texto": "Minuta", "feito": True, "data": "2026-10-15", "hora": "10:00", "resp": "a:2"},
-            {"id": "a2", "texto": "Revisar", "feito": False, "data": None, "hora": None, "resp": "p:1"}])
+            {"id": "a1", "texto": "Minuta", "feito": True, "data": "2026-10-15", "hora": "10:00", "resp": "a:2", "origem_id": None},
+            {"id": "a2", "texto": "Revisar", "feito": False, "data": None, "hora": None, "resp": "p:1", "origem_id": None}])
 
     def test_cliente_aniversario_e_lancamento_ligado(self):
         con = self.conexao()

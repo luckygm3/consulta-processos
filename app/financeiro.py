@@ -159,7 +159,7 @@ def salvar(con, dados: dict, lid: int | None = None) -> int:
     lanc["cliente_id"] = _cliente_do_quadro(con, lanc["cliente"])
     lanc["atualizado_em"] = db.agora()
     if lid:
-        if not con.execute("SELECT 1 FROM lancamentos WHERE id=%s", (lid,)).fetchone():
+        if not db.travar(con, "lancamentos", lid, dados):
             raise LookupError("Lançamento não encontrado")
         con.execute(f"UPDATE lancamentos SET {','.join(f'{k}=%s' for k in lanc)} WHERE id=%s", [*lanc.values(), lid])
         con.execute("DELETE FROM parcelas WHERE lancamento_id=%s", (lid,))  # pagamentos saem junto (cascade)

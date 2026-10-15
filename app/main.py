@@ -4,11 +4,11 @@ import logging
 import re
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, banco_antigo, cnj, config, db, rotas_agenda, rotas_financeiro, rotas_quadro, sync
+from . import auth, banco_antigo, cnj, config, db, interligar, rotas_agenda, rotas_financeiro, rotas_quadro, sync
 from .config import STATIC_DIR
 
 config.configurar_log()
@@ -22,6 +22,12 @@ app.include_router(rotas_quadro.rotas)
 app.include_router(rotas_financeiro.rotas)
 
 SEM_CACHE = {"Cache-Control": "no-cache"}
+
+
+@app.exception_handler(db.Conflito)
+async def conflito(request, e: db.Conflito):
+    """Card, tarefa ou lançamento salvo por outra pessoa depois que a tela o leu: a tela pergunta o que fazer."""
+    return JSONResponse({"detail": str(e)}, status_code=409)
 
 
 @app.middleware("http")
@@ -60,6 +66,7 @@ def publico():
 def estado():
     with db.conexao() as con:
         db.garantir_padroes(con)  # tipos de ato e feriados dos próximos anos, se ainda não existirem
+        interligar.migrar(con)  # uma vez só: clientes dos processos que já existiam e o Kanban antigo do Monitoramento
         cfg = config.efetiva(con)
         visiveis = f"NOT {db.COOPERACAO_SQL}" if cfg["ocultar_cooperacao"] else "true"
         total = con.execute(f"SELECT COUNT(*) FROM processos WHERE {visiveis}").fetchone()[0]
@@ -104,6 +111,9 @@ def processos(tribunal: str = "", q: str = "", novidades: bool = False, advogada
 def processo(numero: str):
     with db.conexao() as con:
         p = db.detalhe(con, _numero(numero))
+        if p:  # cliente(s) deste processo, para o painel abrir o card
+            p["clientes"] = [dict(r) for r in con.execute("SELECT id, nome FROM clientes WHERE numero=%s ORDER BY id",
+                                                          (p["numero"],))]
     if not p:
         raise HTTPException(404, "Processo não encontrado")
     return p
@@ -170,6 +180,7 @@ def adicionar(dados: Adicionar):
                     db.vincular(con, n, adv_id, "manual")
         for n in novos:
             db.recalcular_resumo(con, n)
+        interligar.garantir_clientes(con, novos)  # cada processo novo já ganha o cliente (card em Clientes)
     consultando = False
     if novos:
         consultando = sync.iniciar(djen=False, datajud=True, numeros=novos) or sync.rodando()

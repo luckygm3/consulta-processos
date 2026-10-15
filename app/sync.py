@@ -14,7 +14,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 
-from . import cnj, config, db
+from . import cnj, config, db, interligar
 from .datajud import TAMANHO_LOTE, DatajudChaveInvalida, DatajudClient, DatajudErro
 from .djen import DjenClient, DjenErro
 from .tempo import TempoEsgotado
@@ -205,7 +205,8 @@ def _unidade_djen(estado: dict, cfg: dict, limite: float, clientes: dict):
         processos = {n for a in dj["advs"] for n in a["processos"]}
         por_adv = [f"{a['nome']}: {len(a['processos'])}" for a in dj["advs"]]
         estado["resumo"].append(f"DJEN: {dj['lidas']} publicações lidas, {dj['novas']} novas, {len(processos)} processos"
-                                + (f" ({', '.join(por_adv)})" if len(por_adv) > 1 else ""))
+                                + (f" ({', '.join(por_adv)})" if len(por_adv) > 1 else "")
+                                + (f", {dj['clientes']} clientes novos em Clientes" if dj.get("clientes") else ""))
         estado["fase"] = "datajud" if estado["pedido"]["datajud"] else "fim"
         with db.conexao() as con:
             _gravar(con, estado)
@@ -249,6 +250,12 @@ def _unidade_djen(estado: dict, cfg: dict, limite: float, clientes: dict):
             tocados.discard("")
             for n in tocados:
                 db.recalcular_resumo(con, n)
+            try:  # processo novo já ganha o cliente (card em Clientes), depois da marcação de cooperação acima
+                with db.savepoint(con):
+                    dj["clientes"] = dj.get("clientes", 0) + interligar.garantir_clientes(con, tocados)
+            except Exception as e:  # não trava a sincronização: o card é criado na próxima janela que tocar o processo
+                log.exception("Erro ao criar clientes dos processos")
+                _erro(con, estado, "Clientes", "", f"Clientes dos processos novos não criados: {e}")
             adv["processos"] = sorted(set(adv["processos"]) | tocados)
             if not adv["falhou"]:
                 db.meta_set(con, db.chave_marco(adv), b.isoformat())  # só avança em janelas contíguas sem erro

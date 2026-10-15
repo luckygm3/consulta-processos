@@ -1,4 +1,6 @@
-"""Agenda/Kanban de prazos: tarefas, verificação de prazos nas publicações do DJEN, feriados e tipos de ato."""
+"""Monitoramento: sugestões de prazos, audiências e tarefas (verificação de prazos nas publicações do DJEN e dos
+processos sigilosos), feriados e tipos de ato. Aprovar e rejeitar ficam em interligar.py (a tarefa aprovada vira item
+do checklist do cliente)."""
 import json
 import logging
 from datetime import date, timedelta
@@ -7,9 +9,9 @@ from . import checklist, cnj, config, db, extrair, prazos
 
 log = logging.getLogger("agenda")
 
-STATUS = ["sugerido", "a_fazer", "andamento", "aguardando", "concluido"]
+STATUS = ["sugerido", "aprovado", "a_fazer", "andamento", "aguardando", "concluido"]
 CAMPOS = ["titulo", "tipo", "status", "numero", "advogada_id", "prazo_fatal", "data_interna", "hora", "prioridade",
-          "observacoes", "checklist", "trecho", "calculo", "conferir", "aviso"]
+          "observacoes", "checklist", "trecho", "calculo", "conferir", "aviso", "cliente_id"]
 
 
 # --- calendário -------------------------------------------------------------
@@ -86,14 +88,14 @@ _SELECT = """SELECT t.*, p.tribunal AS p_tribunal, p.orgao AS p_orgao, p.partes 
 
 
 def listar(con, hoje: date | None = None, ocultar_cooperacao: bool | None = None) -> list[dict]:
-    """Tarefas abertas e concluídas. Com "ocultar processos em cooperação" ligado (padrão: o ajuste da tela), as
-    tarefas desses processos ficam de fora (Monitoramento, Agenda e alertas)."""
+    """Sugestões aguardando aprovação (o Monitoramento). Com "ocultar processos em cooperação" ligado (padrão: o ajuste
+    da tela), as desses processos ficam de fora (Monitoramento e alertas)."""
     cals, hoje = Calendarios(con), hoje or date.today()
     if ocultar_cooperacao is None:
         ocultar_cooperacao = config.efetiva(con)["ocultar_cooperacao"]
     # tarefa sem processo (p nulo) continua aparecendo
     filtro = " AND NOT COALESCE(p.cooperacao_manual, p.cooperacao, false)" if ocultar_cooperacao else ""
-    rows = con.execute(_SELECT + f" WHERE t.status != 'descartado'{filtro} ORDER BY t.prazo_fatal NULLS LAST, t.id").fetchall()
+    rows = con.execute(_SELECT + f" WHERE t.status = 'sugerido'{filtro} ORDER BY t.prazo_fatal NULLS LAST, t.id").fetchall()
     itens = checklist.ler(con, "tarefa", [r["id"] for r in rows])
     return [_tarefa_dict(r, cals, hoje, itens) for r in rows]
 
@@ -111,6 +113,8 @@ def _valores(dados: dict) -> dict:
         v["calculo"] = json.dumps(v["calculo"], ensure_ascii=False)
     if "numero" in v:
         v["numero"] = cnj.so_digitos(v["numero"] or "") or None
+    if "cliente_id" in v:  # cliente para onde a tarefa vai ao ser aprovada (sem: o do processo)
+        v["cliente_id"] = int(v["cliente_id"]) if str(v["cliente_id"] or "").isdigit() else None
     if v.get("status") and v["status"] not in STATUS + ["descartado"]:
         raise ValueError("status inválido")
     for k in ("prazo_fatal", "data_interna"):
@@ -121,9 +125,15 @@ def _valores(dados: dict) -> dict:
     return v
 
 
+def _conferir_cliente(con, v: dict):
+    if v.get("cliente_id") and not con.execute("SELECT 1 FROM clientes WHERE id=%s", (v["cliente_id"],)).fetchone():
+        raise ValueError("Cliente não encontrado (foi excluído?)")
+
+
 def criar(con, dados: dict) -> int:
     v = _valores(dados)
-    v.setdefault("status", "a_fazer")
+    _conferir_cliente(con, v)
+    v.setdefault("status", "sugerido")
     v["origem"] = dados.get("origem", "manual")
     v["comunicacao_hash"] = dados.get("comunicacao_hash")
     v["criado_em"] = v["atualizado_em"] = db.agora()
@@ -142,39 +152,20 @@ def _lista(valor) -> list:
 
 
 def atualizar(con, tid: int, dados: dict):
+    """Edita uma sugestão antes de aprovar. O status só muda por aprovar/rejeitar (interligar.py)."""
     v = _valores(dados)
+    v.pop("status", None)
+    _conferir_cliente(con, v)
+    atual = db.travar(con, "tarefas", tid, dados)
+    if not atual:
+        return
     if "checklist" in dados:
         checklist.gravar(con, "tarefa", tid, _lista(dados["checklist"]))
     elif not v:
         return
     v["atualizado_em"] = db.agora()
-    atual = con.execute("SELECT status FROM tarefas WHERE id=%s", (tid,)).fetchone()
-    if "status" in v and atual and v["status"] != atual["status"]:
-        concluindo = v["status"] == "concluido"
-        v["concluido_em"] = db.agora() if concluindo else None
-        v["status_anterior"] = atual["status"] if concluindo else None
     sets = ",".join(f"{k}=%s" for k in v)
     con.execute(f"UPDATE tarefas SET {sets} WHERE id=%s", [*v.values(), tid])
-
-
-def restaurar(con, tid: int) -> bool:
-    """Tira de Concluídos e devolve à coluna em que estava (ou 'A fazer')."""
-    cur = con.execute("""UPDATE tarefas SET status=COALESCE(NULLIF(status_anterior, 'concluido'), 'a_fazer'),
-                         status_anterior=NULL, concluido_em=NULL, atualizado_em=%s WHERE id=%s AND status='concluido'""",
-                      (db.agora(), tid))
-    return cur.rowcount > 0
-
-
-def lote(con, ids: list[int], acao: str) -> int:
-    if acao == "confirmar":
-        cur = con.execute("UPDATE tarefas SET status='a_fazer', atualizado_em=%s WHERE status='sugerido' AND id = ANY(%s)",
-                          (db.agora(), list(ids)))
-    elif acao == "descartar":  # fica guardado como descartado: a mesma publicação não volta a sugerir
-        cur = con.execute("UPDATE tarefas SET status='descartado', atualizado_em=%s WHERE id = ANY(%s)",
-                          (db.agora(), list(ids)))
-    else:
-        raise ValueError("ação inválida")
-    return cur.rowcount
 
 
 # --- processos sigilosos: tarefa semanal de verificação manual ------------------
@@ -201,9 +192,10 @@ def _nivel(valor) -> int:
 
 
 def gerar_semanais(con, hoje: date | None = None) -> int:
-    """Uma tarefa por processo sigiloso por semana (a partir da segunda-feira). Não duplica: cada semana fica
-    registrada em tarefas_geradas, então concluir ou excluir só faz reaparecer na segunda seguinte; e se a da
-    semana anterior ainda está aberta, não cria outra."""
+    """Uma sugestão por processo sigiloso por semana (a partir da segunda-feira), no Monitoramento. Não duplica: cada
+    semana fica registrada em tarefas_geradas, então rejeitar, ou marcar como feita no cliente, só faz reaparecer na
+    segunda seguinte; e se a da semana anterior ainda está aberta (aguardando aprovação, ou aprovada e não feita),
+    não cria outra."""
     hoje = hoje or date.today()
     segunda = hoje - timedelta(days=hoje.weekday())
     criadas = 0
@@ -212,12 +204,14 @@ def gerar_semanais(con, hoje: date | None = None) -> int:
                           (f"sigilo:{numero}:{segunda.isoformat()}", db.agora()))
         if not cur.rowcount:
             continue  # esta semana já foi gerada
-        if con.execute("SELECT 1 FROM tarefas WHERE origem='sigilo' AND numero=%s AND status NOT IN ('concluido', 'descartado')",
+        if con.execute("""SELECT 1 FROM tarefas t WHERE t.origem='sigilo' AND t.numero=%s
+                            AND (t.status IN ('sugerido', 'a_fazer', 'andamento', 'aguardando')
+                                 OR EXISTS (SELECT 1 FROM checklist_itens i WHERE i.origem_id=t.id AND NOT i.feito))""",
                        (numero,)).fetchone():
             continue
         advs = [r[0] for r in con.execute("SELECT advogada_id FROM processo_advogada WHERE numero=%s", (numero,))]
         criar(con, {"titulo": f"Verificar processo sigiloso nº {cnj.formatar(numero)}", "tipo": "tarefa",
-                    "status": "a_fazer", "numero": numero, "advogada_id": advs[0] if len(advs) == 1 else None,
+                    "status": "sugerido", "numero": numero, "advogada_id": advs[0] if len(advs) == 1 else None,
                     "prazo_fatal": max(segunda, hoje).isoformat(), "prioridade": "media", "origem": "sigilo",
                     "observacoes": "O DataJud não mostra este processo (segredo de justiça ou sigilo). "
                                    "Conferir as movimentações direto no sistema do tribunal."})
@@ -228,13 +222,14 @@ def gerar_semanais(con, hoje: date | None = None) -> int:
 
 
 def alertas(con) -> dict:
+    """Sugestões aguardando aprovação, e quantas delas vencem hoje/amanhã ou já venceram. (As tarefas aprovadas, que
+    estão nos clientes, são contadas em rotas_agenda.alertas.)"""
     hoje = date.today()
     cont = {"vencidos": 0, "hoje": 0, "amanha": 0, "sugeridos": 0}
     for t in listar(con, hoje):
-        if t["status"] == "concluido" or t["origem"] == "sigilo":  # verificação semanal não é prazo: fica fora do alerta
+        cont["sugeridos"] += 1
+        if t["origem"] == "sigilo":  # verificação semanal não é prazo: fica fora do alerta
             continue
-        if t["status"] == "sugerido":
-            cont["sugeridos"] += 1
         if t["urgencia"] == "vencido":
             cont["vencidos"] += 1
         elif t["urgencia"] in ("hoje", "amanha"):

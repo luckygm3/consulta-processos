@@ -71,6 +71,25 @@ async function api(url, opcoes = {}) {
   return r.json();
 }
 
+// Salva um card, tarefa ou lançamento que já existe mandando a versão que a tela leu (atualizado_em). Se outra
+// pessoa (ou outra aba) salvou depois, o servidor recusa (409) para não apagar o que ela fez, e aqui se pergunta:
+// salvar mesmo assim, ou não salvar. Não salvando, o diálogo fica como está (nada do que foi digitado se perde) e a
+// tela recarrega por trás, para que fechar e abrir de novo mostre a versão atual.
+async function salvarConferindo(url, metodo, dados, lido, aviso) {
+  try {
+    return await api(url, { method: metodo, body: JSON.stringify({ ...dados, versao: lido.atualizado_em ?? null }) });
+  } catch (e) {
+    if (e.status !== 409) throw e;
+  }
+  if (!confirm(`${aviso} por outra pessoa (ou em outra aba) enquanto você editava.\n\n`
+    + "OK = salvar mesmo assim (o que foi mudado lá se perde)\n"
+    + "Cancelar = não salvar agora (o que você digitou continua aqui)")) {
+    recarregarTela();
+    throw new Error("Não salvo: isto foi alterado enquanto você editava. Feche e abra de novo para ver a versão atual.");
+  }
+  return api(url, { method: metodo, body: JSON.stringify(dados) });
+}
+
 const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 function esc(s) {
@@ -420,7 +439,8 @@ function renderPainel(p) {
     <div class="painel-acoes">
       <button class="btn ${p.novo ? "primario" : ""}" type="button" id="pa-visto" ${p.novo ? "" : "disabled"}>${p.novo ? "✓ Marcar como visto" : "✓ Visto"}</button>
       <button class="btn" type="button" id="pa-atualizar">⟳ Atualizar este processo</button>
-      <button class="btn" type="button" id="pa-tarefa">+ Tarefa / prazo</button>
+      <button class="btn" type="button" id="pa-tarefa" title="Vai direto para o checklist do cliente deste processo">+ Tarefa / prazo</button>
+      ${(p.clientes || []).map((c) => `<button class="btn" type="button" data-pa-cliente="${c.id}" title="Abrir o cliente (card em Clientes)">👤 ${esc(c.nome)}</button>`).join("")}
       <button class="btn perigo" type="button" id="pa-remover">Remover da lista</button>
     </div>
     ${nota}
@@ -440,6 +460,7 @@ function renderPainel(p) {
     numero: p.numero, numero_fmt: p.numero_fmt, tipo: "prazo",
     advogada_id: p.advogadas.length === 1 ? p.advogadas[0] : null,
   });
+  $("#p-corpo").querySelectorAll("[data-pa-cliente]").forEach((b) => { b.onclick = () => abrirCardPorId(Number(b.dataset.paCliente)); });
   $("#pa-contagem").onchange = async (ev) => {
     await api(`/api/processos/${p.numero}/contagem`, { method: "POST", body: JSON.stringify({ contagem: ev.target.value }) });
     toast("Contagem salva: vale para os próximos cálculos deste processo.");
@@ -827,4 +848,19 @@ function iniciarApp() {
   mostrarTela(location.hash.slice(1) || lerPreferencia("tela") || "processos");
 }
 
+// Duas pessoas usando ao mesmo tempo: ao voltar para esta aba (ou janela), recarrega a tela aberta para mostrar o que
+// a outra fez. Não recarrega com um diálogo aberto ou com algo sendo digitado (a edição em andamento não se perde),
+// durante o "Atualizar tudo" (que recarrega sozinho no fim), nem mais de uma vez a cada 15 s.
+let ultimaVolta = 0;
+function aoVoltar() {
+  if (document.visibilityState !== "visible" || !sessao.entrou || estado.sincronizando) return;
+  if (document.querySelector("dialog[open]") || document.activeElement?.matches("input, textarea, select")) return;
+  if (Date.now() - ultimaVolta < 15e3) return;
+  ultimaVolta = Date.now();
+  if (estado.tela === "processos") carregarProcessos().catch(() => {});
+  recarregarTela();
+}
+
 ligarEventos();
+document.addEventListener("visibilitychange", aoVoltar);
+window.addEventListener("focus", aoVoltar);

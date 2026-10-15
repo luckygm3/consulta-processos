@@ -13,14 +13,19 @@ const ICONE_QUANDO = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidde
 const novoIdItem = () => Math.random().toString(36).slice(2, 10);
 const diaMes = (iso) => (iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}` : "");
 
+// Item que veio do Monitoramento (ou de "+ Nova tarefa") guarda a ligação com a tarefa (origem_id) e o tipo dela
+// (prazo, audiência, tarefa), só para mostrar: o servidor confere a ligação ao salvar
 function itemLimpo(c) {
-  const data = (typeof c === "object" && c.data) || null;
+  const obj = typeof c === "object" && c ? c : {};
+  const data = obj.data || null;
   return {
-    id: (typeof c === "object" && c.id) || novoIdItem(), texto: String(typeof c === "object" ? c.texto ?? "" : c),
-    feito: !!(typeof c === "object" && c.feito), data, hora: data && c.hora ? c.hora : null,
-    resp: (typeof c === "object" && c.resp) || null,
+    id: obj.id || novoIdItem(), texto: String(typeof c === "object" ? obj.texto ?? "" : c),
+    feito: !!obj.feito, data, hora: data && obj.hora ? obj.hora : null, resp: obj.resp || null,
+    origem_id: obj.origem_id || null, tipo: obj.tipo || null, prazo_tipo: obj.prazo_tipo || null,
   };
 }
+
+const NOME_TIPO_ITEM = { prazo: "prazo", audiencia: "audiência", tarefa: "tarefa" };
 
 // prazo: função que devolve a data (AAAA-MM-DD) do prazo fatal da demanda, para avisar etapas marcadas depois dele
 function criarChecklist(raiz, { titulo = "Checklist", prazo = () => null } = {}) {
@@ -33,8 +38,8 @@ function criarChecklist(raiz, { titulo = "Checklist", prazo = () => null } = {})
     <input type="text" class="ck-novo" placeholder="+ Adicionar item" aria-label="Novo item da checklist" autocomplete="off">`;
   const ul = raiz.querySelector(".ck-lista"), novo = raiz.querySelector(".ck-novo");
 
-  // etapa ainda aberta marcada para depois do prazo fatal (feita não importa mais)
-  const tarde = (c) => { const p = prazo(); return !!(!c.feito && c.data && p && c.data > p); };
+  // etapa ainda aberta marcada para depois do prazo fatal (feita não importa mais; prazo e audiência têm data própria)
+  const tarde = (c) => { const p = prazo(); return !!(!c.feito && !c.tipo && c.data && p && c.data > p); };
 
   function cabecalho() {
     const feitos = itens.filter((c) => c.feito).length;
@@ -46,12 +51,16 @@ function criarChecklist(raiz, { titulo = "Checklist", prazo = () => null } = {})
   function metaHTML(c) {
     const pessoa = pessoaPorChave(c.resp);
     const partes = [];
+    if (c.tipo) {
+      const marca = c.tipo === "prazo" && typeof marcaPrazo === "function" ? marcaPrazo(c.prazo_tipo) : "";
+      partes.push(`<span class="ck-orig" title="Veio do Monitoramento (ou de “+ Nova tarefa”)">${marca}${NOME_TIPO_ITEM[c.tipo] || c.tipo}</span>`);
+    }
     if (c.data) {
       const aviso = tarde(c) ? `Depois do prazo fatal (${diaMes(prazo())})` : "Data e responsável";
       partes.push(`<button type="button" class="ck-chip ${tarde(c) ? "tarde" : ""}" data-det title="${aviso}">${diaMes(c.data)}${c.hora ? " " + c.hora : ""}</button>`);
     }
     if (pessoa) partes.push(`<button type="button" class="ck-chip ck-quem" data-det title="Responsável: ${esc(pessoa.nome_completo)}">${esc(pessoa.nome)}</button>`);
-    if (!partes.length) partes.push(`<button type="button" class="ck-det" data-det title="Data e responsável" aria-label="Data e responsável">${ICONE_QUANDO}</button>`);
+    if (!c.data && !pessoa) partes.push(`<button type="button" class="ck-det" data-det title="Data e responsável" aria-label="Data e responsável">${ICONE_QUANDO}</button>`);
     return partes.join("");
   }
 
@@ -204,6 +213,11 @@ function criarChecklist(raiz, { titulo = "Checklist", prazo = () => null } = {})
       novo.value = "";
       render();
     },
+    // acrescenta itens no fim (ex.: a checklist padrão num card que foi criado sozinho, vazio)
+    adicionar(lista) {
+      itens.push(...(lista || []).map(itemLimpo));
+      render();
+    },
     valor() {
       const pendente = novo.value.trim();
       return [...itens, ...(pendente ? [itemLimpo(pendente)] : [])]
@@ -232,7 +246,7 @@ function proximoItem(lista) {
 
 // Etapas ainda abertas marcadas para depois do prazo fatal (aviso discreto, não bloqueia)
 function etapasDepoisDoPrazo(lista, prazoData) {
-  return prazoData ? (lista || []).filter((c) => !c.feito && c.data && c.data > prazoData).length : 0;
+  return prazoData ? (lista || []).filter((c) => !c.feito && !c.tipo && c.data && c.data > prazoData).length : 0;
 }
 
 function areaRolavel(el) {
