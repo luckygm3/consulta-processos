@@ -1,5 +1,6 @@
 # Não sobe para a Vercel: banco antigo, logs, ambiente local, testes e segredos
 db/
+db-antigo/
 logs/
 .venv/
 tests/

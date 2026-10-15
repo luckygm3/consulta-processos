@@ -1,5 +1,6 @@
 # Dados dos processos (nomes de partes, textos de intimações): ficam só no computador de quem usa
 db/
+db-antigo/
 logs/
 
 # Ambiente Python
